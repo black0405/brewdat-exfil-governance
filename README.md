@@ -47,6 +47,12 @@ Private repository: use a deploy key or token in `REPO_URL`, for example `https:
 * **Who submits:** only a control's owners submit evidence. Admins view and review.
 * **Monthly sheet** shows every column and figure for any month. **Download Excel** gives one sheet per month in a single workbook.
 
+## Email templates and the yearly baseline
+
+* **Templates:** under **Email and schedule > Templates**, admins edit the monthly request, January baseline request, reminder, approved and denied emails. Placeholders such as `{name}`, `{month}`, `{controls}` and `{link}` are filled in for each owner. **Reset to default** restores the original text.
+* **Custom templates:** admins can add their own, for example an audit deadline notice, and send it to every owner or only to owners with open controls.
+* **Yearly baseline:** Identified is a yearly baseline. The first submission each year (normally January) sets it, and the January request uses the baseline template to ask for it. Past months keep the baseline they were submitted under, so history and old scores do not change.
+
 ## How emails work
 
 * **Monthly request:** sent on the chosen day (1 to 7) from 08:00 server time. Each owner gets one email listing their controls that have no evidence for the month yet.

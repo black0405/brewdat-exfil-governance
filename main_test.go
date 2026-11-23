@@ -489,9 +489,50 @@ func TestPortal(t *testing.T) {
 		t.Fatalf("no change from imported figures wrong: %d %q", rem, note)
 	}
 
+	// Templates: edit, reset, and a custom one sent to every owner.
+	admin.post("/admin/templates/reminder", url.Values{"csrf": {tok}, "subject": {"Gentle nudge for {month}"}, "body": {"Hi {name}, {count} open: {controls}"}})
+	if subj, body := app.emailText("reminder", "Alex", 202604, []string{"  • B07: Access review"}, ""); subj != "Gentle nudge for April 2026" || !strings.Contains(body, "Hi Alex, 1 control open") {
+		t.Fatalf("edited reminder not used: %q %q", subj, body)
+	}
+	admin.post("/admin/templates/reminder/delete", url.Values{"csrf": {tok}})
+	if subj, _ := app.emailText("reminder", "Alex", 202604, nil, ""); subj != "Reminder: evidence still needed for April 2026" {
+		t.Fatalf("reset reminder wrong: %q", subj)
+	}
+	admin.post("/admin/templates", url.Values{"csrf": {tok}, "name": {"Audit notice"}, "subject": {"Audit for {month}"}, "body": {"Hello {name}, {controls}"}})
+	var customKey string
+	db.QueryRow(`SELECT key FROM email_templates WHERE name = 'Audit notice'`).Scan(&customKey)
+	admin.post("/admin/templates/"+customKey+"/send", url.Values{"csrf": {tok}, "audience": {"all"}})
+	if sentTo("alex@brewdat.local", "Audit for April 2026") != 1 || sentTo("sam@brewdat.local", "Audit for April 2026") != 1 {
+		t.Fatalf("custom template not sent to every owner")
+	}
+
+	// January: the request asks for a new baseline, which owners set once; last year's history keeps its own.
+	clock = time.Date(2027, 1, 5, 9, 0, 0, 0, time.Local)
+	relogin()
+	app.tick(clock)
+	if sentTo("alex@brewdat.local", "New year baseline: please set identified for 2027") != 1 {
+		t.Fatalf("January baseline request not sent: %v", sent[len(sent)-1])
+	}
+	if _, body := alex.get(cpath); !strings.Contains(body, `name="identified"`) || strings.Contains(body, "/nochange") {
+		t.Error("January should ask for a new baseline and hide no change")
+	}
+	alex.multipart(cpath+"/evidence", map[string]string{"csrf": alex.csrf(cpath), "period": "202701", "identified": "80", "remediated": "10"}, "files", map[string]string{"jan.txt": "x"})
+	var janIdent, oldIdent, idYear int64
+	db.QueryRow(`SELECT identified, identified_year FROM controls WHERE id = ?`, controlID).Scan(&janIdent, &idYear)
+	db.QueryRow(`SELECT identified FROM submissions WHERE control_id = ? AND period = 202603 ORDER BY id DESC LIMIT 1`, controlID).Scan(&oldIdent)
+	if janIdent != 80 || idYear != 2027 || oldIdent != 100 {
+		t.Fatalf("baselines wrong: new %d (%d), March kept %d", janIdent, idYear, oldIdent)
+	}
+	if _, body := admin.get("/sheet?period=202603"); !strings.Contains(body, ">100<") {
+		t.Error("March 2026 should still show its own baseline of 100")
+	}
+	if _, body := alex.get(cpath); !strings.Contains(body, "Identified baseline 2027") {
+		t.Error("control page should show the 2027 baseline")
+	}
+
 	// Every page, as each role, is free of dashes in visible text.
 	for _, p := range []string{"/", cpath, "/sheet", "/sheet?period=202603", "/account", "/admin/controls", "/admin/controls/" + itoa(controlID),
-		"/admin/review", "/admin/review?show=reviewed", "/admin/executive", "/admin/executive?period=202604", "/admin/users", "/admin/users/" + itoa(alexID), "/admin/settings", "/nope"} {
+		"/admin/review", "/admin/review?show=reviewed", "/admin/executive", "/admin/executive?period=202604", "/admin/templates", "/admin/users", "/admin/users/" + itoa(alexID), "/admin/settings", "/nope"} {
 		_, body := admin.get(p)
 		assertNoDash(t, "admin "+p, body)
 	}

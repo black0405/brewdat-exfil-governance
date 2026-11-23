@@ -184,6 +184,12 @@ ALTER TABLE controls ADD COLUMN remediated INTEGER; -- last known figure from an
 UPDATE controls SET code = printf('B%02d', CAST(code AS INTEGER))
   WHERE code GLOB '[0-9]*' AND code NOT GLOB '*[^0-9]*'
   AND printf('B%02d', CAST(code AS INTEGER)) NOT IN (SELECT code FROM controls);
+`, `
+ALTER TABLE controls ADD COLUMN identified_year INTEGER; -- the year the current identified baseline belongs to
+UPDATE controls SET identified_year = CAST(strftime('%Y', 'now', 'localtime') AS INTEGER) WHERE identified IS NOT NULL;
+ALTER TABLE submissions ADD COLUMN identified INTEGER; -- baseline in force when submitted, so history never shifts
+UPDATE submissions SET identified = (SELECT identified FROM controls c WHERE c.id = submissions.control_id);
+CREATE TABLE email_templates (key TEXT PRIMARY KEY, name TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL);
 `}
 
 func migrate(db *sql.DB) error {
@@ -350,6 +356,11 @@ func (a *App) routes() http.Handler {
 	admin("POST /admin/users/{id}", a.updateUser)
 	admin("POST /admin/users/{id}/reset", a.resetUser)
 	admin("GET /admin/settings", a.settingsPage)
+	admin("GET /admin/templates", a.templatesPage)
+	admin("POST /admin/templates", a.createTemplate)
+	admin("POST /admin/templates/{key}", a.saveTemplate)
+	admin("POST /admin/templates/{key}/delete", a.deleteTemplate)
+	admin("POST /admin/templates/{key}/send", a.sendTemplate)
 	admin("POST /admin/settings", a.saveSettings)
 	admin("POST /admin/settings/test", a.testEmail)
 

@@ -270,10 +270,14 @@ func (a *App) monthRows(u *User, period, current int) ([]Row, error) {
 	if u.IsAdmin() {
 		isAdmin = 1
 	}
-	rows, err := a.db.Query(`SELECT c.id, c.code, c.title, c.description, c.fields, c.identified, c.accepted,
+	rows, err := a.db.Query(`SELECT c.id, c.code, c.title, c.description, c.fields,
+		COALESCE(l.identified, CASE WHEN c.identified_year = ?1 / 100 THEN c.identified ELSE
+			(SELECT s.identified FROM submissions s WHERE s.control_id = c.id AND s.period / 100 = ?1 / 100 AND s.identified IS NOT NULL ORDER BY s.id DESC LIMIT 1) END),
+		c.accepted,
 		COALESCE(l.id, 0), COALESCE(l.status, ''), COALESCE(l.remediated, 0), COALESCE(l.accepted, 0), COALESCE(l.created_at, 0),
 		COALESCE((SELECT group_concat(u.name, ', ') FROM control_owners o JOIN users u ON u.id = o.user_id WHERE o.control_id = c.id), ''),
-		COALESCE((SELECT p.remediated FROM latest p WHERE p.control_id = c.id AND p.period < ?1 AND p.status = 'approved' ORDER BY p.period DESC LIMIT 1), c.remediated)
+		COALESCE((SELECT p.remediated FROM latest p WHERE p.control_id = c.id AND p.period < ?1 AND p.period / 100 = ?1 / 100 AND p.status = 'approved' ORDER BY p.period DESC LIMIT 1),
+			CASE WHEN c.identified_year = ?1 / 100 THEN c.remediated END)
 		FROM controls c LEFT JOIN latest l ON l.control_id = c.id AND l.period = ?1
 		WHERE ?2 = 1 OR c.id IN (SELECT control_id FROM control_owners WHERE user_id = ?3)
 		ORDER BY length(c.code), c.code`, period, isAdmin, u.ID)
@@ -548,6 +552,16 @@ func (a *App) canSubmit(w http.ResponseWriter, r *http.Request, controlID int64)
 	return false
 }
 
+// baseline is the identified baseline for the year of period: the control's current one when it belongs to
+// that year, else the one recorded on that year's submissions. Each January owners set a new one.
+func (a *App) baseline(controlID int64, period int) sql.NullInt64 {
+	var b sql.NullInt64
+	a.db.QueryRow(`SELECT CASE WHEN c.identified_year = ?2 THEN c.identified ELSE
+		(SELECT s.identified FROM submissions s WHERE s.control_id = c.id AND s.period / 100 = ?2 AND s.identified IS NOT NULL ORDER BY s.id DESC LIMIT 1) END
+		FROM controls c WHERE c.id = ?1`, controlID, period/100).Scan(&b)
+	return b
+}
+
 func (a *App) latestStatus(controlID int64, period int) string {
 	var st string
 	a.db.QueryRow(`SELECT status FROM latest WHERE control_id = ? AND period = ?`, controlID, period).Scan(&st)
@@ -563,12 +577,17 @@ func (a *App) controlPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var code, title, desc, fields string
-	var ident, lastRem sql.NullInt64
+	var lastRem, idYear sql.NullInt64
 	var accepted int64
-	if err := a.db.QueryRow(`SELECT code, title, description, fields, identified, accepted, remediated FROM controls WHERE id = ?`, id).
-		Scan(&code, &title, &desc, &fields, &ident, &accepted, &lastRem); err != nil {
+	if err := a.db.QueryRow(`SELECT code, title, description, fields, accepted, remediated, identified_year FROM controls WHERE id = ?`, id).
+		Scan(&code, &title, &desc, &fields, &accepted, &lastRem, &idYear); err != nil {
 		a.notFound(w, r)
 		return
+	}
+	year := periodOf(a.now()) / 100
+	ident := a.baseline(id, year*100+1)
+	if idYear.Int64 != int64(year) {
+		lastRem = sql.NullInt64{} // last year's figures do not carry into a new year
 	}
 	f := decodeFields(fields)
 	var details []Detail
@@ -605,7 +624,7 @@ func (a *App) controlPage(w http.ResponseWriter, r *http.Request) {
 		if s.Latest && s.Period == cur {
 			curStatus = s.Status
 		}
-		if s.Latest && s.Period < cur && s.Status != "denied" {
+		if s.Latest && s.Period < cur && s.Period/100 == cur/100 && s.Status != "denied" {
 			canCarry = true
 		}
 		if !s.Latest && s.Status == "pending" {
@@ -620,7 +639,7 @@ func (a *App) controlPage(w http.ResponseWriter, r *http.Request) {
 		case !s.Latest:
 		case s.Period == cur && figRow.Sub == "":
 			figRow.Sub, figRow.Remediated, figRow.Accepted = s.Status, s.Remediated, s.Accepted
-		case s.Period < cur && s.Status == "approved" && !carried:
+		case s.Period < cur && s.Period/100 == cur/100 && s.Status == "approved" && !carried:
 			figRow.LastRem, carried = sql.NullInt64{Int64: s.Remediated, Valid: true}, true
 		}
 	}
@@ -632,7 +651,8 @@ func (a *App) controlPage(w http.ResponseWriter, r *http.Request) {
 		"ID": id, "Code": code, "ControlTitle": title, "Description": desc, "Owners": strings.Join(owners, ", "),
 		"Details": details, "Identified": ident, "Accepted": accepted, "Fig": figRow.Fig(),
 		"Subs": subs, "Periods": recentPeriods(now, 12), "Current": cur, "Status": st, "Class": cls,
-		"Approved": curStatus == "approved", "CanCarry": canCarry || (lastRem.Valid && ident.Valid),
+		"Approved": curStatus == "approved", "CanCarry": ident.Valid && (canCarry || lastRem.Valid), "Year": year,
+		"NewYear":   !ident.Valid && cur%100 <= 3 && a.baseline(id, (year-1)*100+12).Valid,
 		"CanSubmit": a.isOwner(u, id),
 		"MaxMB":     a.cfg.MaxUploadMB, "MaxFiles": maxFiles,
 	}})
@@ -641,7 +661,7 @@ func (a *App) controlPage(w http.ResponseWriter, r *http.Request) {
 // submissions loads submissions with their files; where filters on s, c and u.
 func (a *App) submissions(where string, args ...any) ([]*Submission, error) {
 	rows, err := a.db.Query(`SELECT s.id, s.control_id, c.code, c.title, s.period, s.note, s.created_at, u.name,
-		s.status, s.deny_reason, s.remediated, s.accepted, c.identified, COALESCE(rv.name, ''), s.reviewed_at,
+		s.status, s.deny_reason, s.remediated, s.accepted, COALESCE(s.identified, c.identified), COALESCE(rv.name, ''), s.reviewed_at,
 		COALESCE(f.id, 0), COALESCE(f.orig_name, ''), COALESCE(f.size, 0)
 		FROM submissions s JOIN controls c ON c.id = s.control_id JOIN users u ON u.id = s.user_id
 		LEFT JOIN users rv ON rv.id = s.reviewed_by
@@ -696,14 +716,14 @@ func (a *App) uploadEvidence(w http.ResponseWriter, r *http.Request) {
 		fail(periodLabel(period) + " is already approved. Ask an administrator if it needs to change.")
 		return
 	}
-	var ident sql.NullInt64
 	var accepted int64
-	a.db.QueryRow(`SELECT identified, accepted FROM controls WHERE id = ?`, id).Scan(&ident, &accepted)
+	a.db.QueryRow(`SELECT accepted FROM controls WHERE id = ?`, id).Scan(&accepted)
+	ident := a.baseline(id, period)
 	identified := ident.Int64
 	if !ident.Valid {
 		v, ok := intCell(r.PostForm.Get("identified"))
 		if !ok {
-			fail("Enter how many were identified. It becomes the fixed baseline for this control.")
+			fail(fmt.Sprintf("Enter how many were identified. It becomes the fixed baseline for %d.", period/100))
 			return
 		}
 		identified = v
@@ -787,12 +807,14 @@ func (a *App) insertSubmission(controlID int64, period int, userID int64, note s
 	}
 	defer tx.Rollback()
 	if setBaseline {
-		if _, err := tx.Exec(`UPDATE controls SET identified = ? WHERE id = ? AND identified IS NULL`, identified, controlID); err != nil {
+		// Only moves forward: a late upload for last year never replaces this year's baseline.
+		if _, err := tx.Exec(`UPDATE controls SET identified = ?1, identified_year = ?2, remediated = NULL
+			WHERE id = ?3 AND (identified IS NULL OR identified_year IS NULL OR identified_year < ?2)`, identified, period/100, controlID); err != nil {
 			return err
 		}
 	}
-	res, err := tx.Exec(`INSERT INTO submissions (control_id, period, user_id, note, created_at, remediated, accepted) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		controlID, period, userID, note, a.now().Unix(), remediated, accepted)
+	res, err := tx.Exec(`INSERT INTO submissions (control_id, period, user_id, note, created_at, remediated, accepted, identified) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		controlID, period, userID, note, a.now().Unix(), remediated, accepted, identified)
 	if err != nil {
 		return err
 	}
@@ -821,18 +843,23 @@ func (a *App) noChange(w http.ResponseWriter, r *http.Request) {
 		fail(periodLabel(period) + " is already approved. Ask an administrator if it needs to change.")
 		return
 	}
-	var ident, lastRem sql.NullInt64
+	var lastRem sql.NullInt64
 	var accepted int64
-	a.db.QueryRow(`SELECT identified, accepted, remediated FROM controls WHERE id = ?`, id).Scan(&ident, &accepted, &lastRem)
+	a.db.QueryRow(`SELECT accepted, CASE WHEN identified_year = ? THEN remediated END FROM controls WHERE id = ?`, period/100, id).Scan(&accepted, &lastRem)
+	ident := a.baseline(id, period)
+	if !ident.Valid {
+		fail(fmt.Sprintf("Set the identified baseline for %d first: submit evidence with this year's Identified figure.", period/100))
+		return
+	}
 	var prev int
 	var remediated int64
 	note := ""
-	err := a.db.QueryRow(`SELECT period, remediated FROM latest WHERE control_id = ? AND period < ? AND status <> 'denied' ORDER BY period DESC LIMIT 1`,
-		id, period).Scan(&prev, &remediated)
+	err := a.db.QueryRow(`SELECT period, remediated FROM latest WHERE control_id = ? AND period < ? AND period / 100 = ? AND status <> 'denied' ORDER BY period DESC LIMIT 1`,
+		id, period, period/100).Scan(&prev, &remediated)
 	switch {
 	case err == nil:
 		note = "No change from " + periodLabel(prev) + "."
-	case lastRem.Valid && ident.Valid:
+	case lastRem.Valid:
 		remediated = lastRem.Int64
 		note = "No change from the figures on record."
 	default:
@@ -955,7 +982,7 @@ func (a *App) reviewSubmission(w http.ResponseWriter, r *http.Request) {
 			rows.Close()
 			failed := false
 			for _, t := range list {
-				subject, body := reviewText(decision == "approve", t.name, code, title, period, reason, s.BaseURL, cid)
+				subject, body := a.reviewText(decision == "approve", t.name, code, title, period, reason, s.BaseURL, cid)
 				if err := a.mailer(s, t.email, subject, body); err != nil {
 					log.Printf("review email to %s: %v", t.email, err)
 					failed = true
@@ -1018,13 +1045,14 @@ func (a *App) editControl(w http.ResponseWriter, r *http.Request) {
 	var subs int
 	var ident sql.NullInt64
 	var accepted int64
-	err := a.db.QueryRow(`SELECT code, title, description, fields, identified, accepted,
+	err := a.db.QueryRow(`SELECT code, title, description, fields, accepted,
 		(SELECT COUNT(*) FROM submissions WHERE control_id = c.id) FROM controls c WHERE id = ?`, id).
-		Scan(&code, &title, &desc, &fields, &ident, &accepted, &subs)
+		Scan(&code, &title, &desc, &fields, &accepted, &subs)
 	if err != nil {
 		a.notFound(w, r)
 		return
 	}
+	ident = a.baseline(id, periodOf(a.now()))
 	users, err := a.activeUsers(id)
 	if err != nil {
 		a.fail(w, r, err)
@@ -1086,7 +1114,7 @@ func (a *App) saveControl(w http.ResponseWriter, r *http.Request) {
 	// Keep pending at zero or more for every month that is not yet approved.
 	if id != 0 && ident.Valid {
 		var maxRem int64
-		a.db.QueryRow(`SELECT COALESCE(MAX(remediated), 0) FROM latest WHERE control_id = ? AND status <> 'approved'`, id).Scan(&maxRem)
+		a.db.QueryRow(`SELECT COALESCE(MAX(remediated), 0) FROM latest WHERE control_id = ? AND period / 100 = ? AND status <> 'approved'`, id, periodOf(a.now())/100).Scan(&maxRem)
 		if maxRem+accepted > ident.Int64 {
 			fail(fmt.Sprintf("Identified cannot be lower than remediated plus accepted risk (%d) on open submissions.", maxRem+accepted))
 			return
@@ -1106,8 +1134,9 @@ func (a *App) saveControl(w http.ResponseWriter, r *http.Request) {
 			}
 			id, _ = res.LastInsertId()
 		} else {
-			res, err := tx.Exec(`UPDATE controls SET code = ?, title = ?, description = ?, fields = ?, accepted = ?, identified = ? WHERE id = ?`,
-				code, title, desc, string(fieldsJSON), accepted, ident, id)
+			year := sql.NullInt64{Int64: int64(periodOf(a.now()) / 100), Valid: ident.Valid}
+			res, err := tx.Exec(`UPDATE controls SET code = ?, title = ?, description = ?, fields = ?, accepted = ?, identified = ?, identified_year = ? WHERE id = ?`,
+				code, title, desc, string(fieldsJSON), accepted, ident, year, id)
 			if err != nil {
 				return err
 			}
@@ -1282,9 +1311,13 @@ func (a *App) importWorkbook(r *http.Request) ([]string, error) {
 		var id int64
 		var title, desc, fieldsJSON string
 		var accepted int64
-		var ident, lastRem sql.NullInt64
-		err := tx.QueryRow(`SELECT id, title, description, fields, accepted, identified, remediated FROM controls WHERE code = ?`, code).
-			Scan(&id, &title, &desc, &fieldsJSON, &accepted, &ident, &lastRem)
+		var ident, lastRem, idYear sql.NullInt64
+		err := tx.QueryRow(`SELECT id, title, description, fields, accepted, identified, remediated, identified_year FROM controls WHERE code = ?`, code).
+			Scan(&id, &title, &desc, &fieldsJSON, &accepted, &ident, &lastRem, &idYear)
+		thisYear := int64(periodOf(a.now()) / 100)
+		if idYear.Int64 != thisYear {
+			ident = sql.NullInt64{} // last year's baseline: the sheet may set this year's
+		}
 		isNew := errors.Is(err, sql.ErrNoRows)
 		if err != nil && !isNew {
 			return nil, err
@@ -1336,16 +1369,24 @@ func (a *App) importWorkbook(r *http.Request) ([]string, error) {
 		}
 		fj, _ := json.Marshal(fields)
 		if isNew {
-			res, err := tx.Exec(`INSERT INTO controls (code, title, description, fields, accepted, identified, remediated, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-				code, title, desc, string(fj), accepted, ident, lastRem, a.now().Unix())
+			res, err := tx.Exec(`INSERT INTO controls (code, title, description, fields, accepted, identified, remediated, identified_year, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				code, title, desc, string(fj), accepted, ident, lastRem, sql.NullInt64{Int64: thisYear, Valid: ident.Valid}, a.now().Unix())
 			if err != nil {
 				return nil, err
 			}
 			id, _ = res.LastInsertId()
 			added++
 		} else {
-			if _, err := tx.Exec(`UPDATE controls SET title = ?, description = ?, fields = ?, accepted = ?, identified = ?, remediated = ? WHERE id = ?`,
-				title, desc, string(fj), accepted, ident, lastRem, id); err != nil {
+			yearVal := idYear
+			if ident.Valid {
+				yearVal = sql.NullInt64{Int64: thisYear, Valid: true}
+			}
+			if !ident.Valid && idYear.Int64 != thisYear {
+				// keep last year's baseline untouched when the sheet has none for this year
+				tx.QueryRow(`SELECT identified FROM controls WHERE id = ?`, id).Scan(&ident)
+			}
+			if _, err := tx.Exec(`UPDATE controls SET title = ?, description = ?, fields = ?, accepted = ?, identified = ?, remediated = ?, identified_year = ? WHERE id = ?`,
+				title, desc, string(fj), accepted, ident, lastRem, yearVal, id); err != nil {
 				return nil, err
 			}
 			updated++

@@ -210,6 +210,81 @@
 </section>
 {{template "foot" .}}{{end}}
 
+{{define "template_fields"}}
+<label>Subject<input type="text" name="subject" maxlength="200" required value="{{.Subject}}"></label>
+<label>Message<textarea name="body" maxlength="10000" required rows="12" class="mail_body">{{.Body}}</textarea></label>
+{{end}}
+
+{{define "admin_templates"}}{{template "head" .}}
+<header class="head">
+  <div><h1>Email and schedule</h1><p class="muted">The emails owners receive. Placeholders in curly brackets are filled in for each person.</p></div>
+  {{template "email_tabs" .}}
+</header>
+
+<section class="panel">
+  <h2>Placeholders</h2>
+  <dl class="details">
+    {{range .D.Placeholders}}<div><dt><code>{{.Label}}</code></dt><dd>{{.Value}}</dd></div>{{end}}
+  </dl>
+</section>
+
+<div class="stack">
+  {{range .D.Templates}}
+  <details class="panel add tpl">
+    <summary>
+      <div>
+        <h2>{{.Name}} <span class="pill {{if .Builtin}}{{if .Edited}}due{{else}}role{{end}}{{else}}ok{{end}}">{{if .Builtin}}{{if .Edited}}Edited{{else}}Default{{end}}{{else}}Custom{{end}}</span></h2>
+        <p class="small muted">{{if .Help}}{{.Help}}{{else}}Sent only when an administrator sends it below.{{end}}</p>
+      </div>
+    </summary>
+    <form method="post" action="/admin/templates/{{.Key}}" class="form">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      {{if not .Builtin}}<label>Name<input type="text" name="name" maxlength="80" required value="{{.Name}}"></label>{{end}}
+      {{template "template_fields" .}}
+      <div class="row-actions start">
+        <button class="btn" type="submit">Save template</button>
+        {{if .Builtin}}{{if .Edited}}<button class="btn ghost" type="submit" formaction="/admin/templates/{{.Key}}/delete" formnovalidate data-confirm="Click again to reset">Reset to default</button>{{end}}
+        {{else}}<button class="btn danger" type="submit" formaction="/admin/templates/{{.Key}}/delete" formnovalidate data-confirm="Click again to delete">Delete</button>{{end}}
+      </div>
+    </form>
+    {{if not .Builtin}}
+    <form method="post" action="/admin/templates/{{.Key}}/send" class="row-actions start send">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      <label class="sr" for="aud_{{.Key}}">Send to</label>
+      <select id="aud_{{.Key}}" name="audience">
+        <option value="open">Owners with controls still open this month</option>
+        <option value="all">Every control owner</option>
+      </select>
+      <button class="btn ghost" type="submit" data-confirm="Click again to send now"{{if not $.D.HasSMTP}} disabled{{end}}>Send now</button>
+      {{if not $.D.HasSMTP}}<span class="small muted">Add an SMTP server under Settings to send.</span>{{end}}
+    </form>
+    {{end}}
+  </details>
+  {{end}}
+</div>
+
+<details class="panel add" id="new">
+  <summary><h2>Add a template</h2></summary>
+  <p class="muted">For one off messages such as audit notices or deadline changes. You can send it to owners from here at any time.</p>
+  <form method="post" action="/admin/templates" class="form">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label>Name<input type="text" name="name" maxlength="80" required placeholder="Audit deadline notice"></label>
+    <label>Subject<input type="text" name="subject" maxlength="200" required placeholder="Evidence needed before the audit on 15 December"></label>
+    <label>Message<textarea name="body" maxlength="10000" required rows="10" class="mail_body">Hello {name},
+
+Please make sure evidence for these controls is uploaded:
+
+{controls}
+
+Upload here: {link}
+
+Thank you,
+BrewDat Exfil Governance</textarea></label>
+    <div><button class="btn" type="submit">Add template</button></div>
+  </form>
+</details>
+{{template "foot" .}}{{end}}
+
 {{define "review_tabs"}}
 <nav class="tabs" aria-label="Review">
   <a href="/admin/review"{{if eq .Title "Review"}} aria-current="page"{{end}}>Waiting{{if .Review}} <span class="badge">{{.Review}}</span>{{end}}</a>
@@ -381,9 +456,17 @@
 </div>
 {{template "foot" .}}{{end}}
 
+{{define "email_tabs"}}
+<nav class="tabs" aria-label="Email">
+  <a href="/admin/settings"{{if eq .Title "Settings"}} aria-current="page"{{end}}>Settings</a>
+  <a href="/admin/templates"{{if eq .Title "Email templates"}} aria-current="page"{{end}}>Templates</a>
+</nav>
+{{end}}
+
 {{define "admin_settings"}}{{template "head" .}}{{$s := .D.S}}
 <header class="head">
   <div><h1>Email and schedule</h1><p class="muted">When owners hear from the portal, and how mail is sent.</p></div>
+  {{template "email_tabs" .}}
 </header>
 <form method="post" action="/admin/settings" class="stack">
   <input type="hidden" name="csrf" value="{{.CSRF}}">

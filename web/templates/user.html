@@ -172,11 +172,11 @@
         <input type="hidden" name="csrf" value="{{.CSRF}}">
         <div class="figures">
           {{if .D.Identified.Valid}}
-          <div class="figure"><span>Identified baseline</span><b>{{.D.Identified.Int64}}</b></div>
+          <div class="figure"><span>Identified baseline {{.D.Year}}</span><b>{{.D.Identified.Int64}}</b></div>
           {{else}}
-          <label>Identified
+          <label>Identified for {{.D.Year}}
             <input type="number" name="identified" min="0" step="1" required data-identified>
-            <span class="small muted">Entered once. It becomes the fixed baseline.</span>
+            <span class="small muted">{{if .D.NewYear}}New year: set this year's baseline.{{else}}Entered once a year.{{end}} It stays fixed until next January.</span>
           </label>
           {{end}}
           <label>Remediated

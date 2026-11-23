@@ -259,7 +259,7 @@ func (a *App) sendDue(now time.Time) {
 		if kind == "" {
 			continue
 		}
-		subject, body := emailText(kind, o.name, period, o.open, s.BaseURL)
+		subject, body := a.emailText(kind, o.name, period, o.open, s.BaseURL)
 		if err := a.mailer(s, o.email, subject, body); err != nil {
 			log.Printf("email %s to %s failed, will retry: %v", kind, o.email, err)
 			continue
@@ -272,41 +272,29 @@ func (a *App) sendDue(now time.Time) {
 }
 
 // reviewText is the email an owner gets when an admin approves or denies their evidence.
-func reviewText(approved bool, name, code, title string, period int, reason, baseURL string, controlID int64) (string, string) {
-	label := periodLabel(period)
+func (a *App) reviewText(approved bool, name, code, title string, period int, reason, baseURL string, controlID int64) (string, string) {
+	key := "denied"
 	if approved {
-		note := ""
-		if reason != "" {
-			note = "Reason: " + reason + "\n\n"
+		key = "approved"
+		if reason == "" {
+			reason = "None given"
 		}
-		return fmt.Sprintf("Evidence approved for %s: %s", label, code),
-			fmt.Sprintf("Hello %s,\n\nYour %s evidence for %s: %s was approved. Nothing more is needed for this month.\n\n%sThank you,\nBrewDat Exfil Governance\n", name, label, code, title, note)
 	}
-	link := "Please sign in to BrewDat Exfil Governance and upload it again."
-	if baseURL != "" {
-		link = fmt.Sprintf("Please upload it again here: %s/controls/%d", baseURL, controlID)
-	}
-	return fmt.Sprintf("Evidence denied for %s: %s", label, code),
-		fmt.Sprintf("Hello %s,\n\nYour %s evidence for %s: %s was denied.\n\nReason: %s\n\n%s\n\nYou will get reminders until new evidence is uploaded.\n\nThank you,\nBrewDat Exfil Governance\n", name, label, code, title, reason, link)
+	return a.fill(key, map[string]string{
+		"name": name, "month": periodLabel(period), "year": strconv.Itoa(period / 100), "code": code,
+		"control": code + ": " + title, "reason": reason, "link": portalLink(baseURL, fmt.Sprintf("/controls/%d", controlID)),
+	})
 }
 
-func emailText(kind, name string, period int, open []string, baseURL string) (string, string) {
-	label := periodLabel(period)
-	link := "Sign in to BrewDat Exfil Governance to upload your files."
-	if baseURL != "" {
-		link = "Upload your files here: " + baseURL
+// emailText fills the monthly request (the baseline request in January) or the reminder for one owner.
+func (a *App) emailText(kind, name string, period int, open []string, baseURL string) (string, string) {
+	if kind == "kickoff" && period%100 == 1 {
+		kind = "baseline"
 	}
-	list := strings.Join(open, "\n")
-	if kind == "kickoff" {
-		return "Evidence requested for " + label,
-			fmt.Sprintf("Hello %s,\n\nThe %s evidence collection is now open. Please upload evidence for the controls you own:\n\n%s\n\n%s\n\nThank you,\nBrewDat Exfil Governance\n", name, label, list, link)
-	}
-	what := "1 control still needs"
-	if len(open) != 1 {
-		what = fmt.Sprintf("%d controls still need", len(open))
-	}
-	return "Reminder: evidence still needed for " + label,
-		fmt.Sprintf("Hello %s,\n\nA friendly reminder that %s evidence for %s:\n\n%s\n\n%s\n\nThank you,\nBrewDat Exfil Governance\n", name, what, label, list, link)
+	return a.fill(kind, map[string]string{
+		"name": name, "month": periodLabel(period), "year": strconv.Itoa(period / 100),
+		"controls": strings.Join(open, "\n"), "count": countText(len(open)), "link": portalLink(baseURL, ""),
+	})
 }
 
 // backup writes one consistent copy of the database per day and keeps the newest 7.
