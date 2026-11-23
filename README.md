@@ -43,7 +43,7 @@ Private repository: use a deploy key or token in `REPO_URL`, for example `https:
 * **Overview** shows every control as a card with Identified, Remediated, Pending and Compliance score.
 * **Executive view** (admins) shows:
   * a speedometer for overall compliance across all controls, with key totals beside it;
-  * controls ranked by compliance, lowest first, grouped by FIFA Category and listed one by one, each labelled At risk (below 70%), Watch (70% to 90%) or On track.
+  * controls ranked by compliance, lowest first, grouped by Category and listed one by one, each labelled At risk (below 70%), Watch (70% to 90%) or On track.
 * **Who submits:** only a control's owners submit evidence. Admins view and review.
 * **Monthly sheet** shows every column and figure for any month. **Download Excel** gives one sheet per month in a single workbook.
 

@@ -29,7 +29,7 @@ type column struct {
 
 var columns = []column{
 	{"code", "Control No", "fixed", []string{"srno", "controlno"}},
-	{"fifa", "FIFA Category", "", nil},
+	{"fifa", "Category", "", []string{"fifacategory"}},
 	{"risk", "Risk", "long", nil},
 	{"areas", "Control Areas", "", nil},
 	{"point", "Egress / Ingress Point applicable", "yn", []string{"applicableyesno", "egressingresspoint"}},
