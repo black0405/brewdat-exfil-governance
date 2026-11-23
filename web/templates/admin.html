@@ -1,0 +1,223 @@
+{{define "control_form"}}
+<form method="post" action="{{if .D.ID}}/admin/controls/{{.D.ID}}{{else}}/admin/controls{{end}}" class="form">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <div class="grid2">
+    <label>Code<input type="text" name="code" maxlength="40" required value="{{.D.Code}}" placeholder="AC 01"></label>
+    <label>Title<input type="text" name="title" maxlength="200" required value="{{.D.ControlTitle}}" placeholder="Quarterly access review"></label>
+  </div>
+  <label>What evidence is needed
+    <textarea name="description" maxlength="4000" placeholder="Describe the files owners should upload each month">{{.D.Description}}</textarea>
+  </label>
+  <fieldset class="owners">
+    <legend>Owners</legend>
+    {{if .D.Users}}
+    <input type="search" placeholder="Find people" data-filter="#owners" aria-label="Find people">
+    <div class="checks" id="owners">
+      {{range .D.Users}}
+      <label class="check" data-text="{{.Name}} {{.Email}}"><input type="checkbox" name="owners" value="{{.ID}}"{{if .Checked}} checked{{end}}><span>{{.Name}} <span class="muted small">{{.Email}}</span></span></label>
+      {{end}}
+    </div>
+    {{else}}
+    <p class="muted">Add people first, then map them to this control.</p>
+    {{end}}
+  </fieldset>
+  <div><button class="btn" type="submit">{{if .D.ID}}Save control{{else}}Add control{{end}}</button></div>
+</form>
+{{end}}
+
+{{define "admin_controls"}}{{template "head" .}}
+<header class="head">
+  <div><h1>Controls</h1><p class="muted">Define the evidence you need each month and who provides it.</p></div>
+  <a class="btn" href="#new">Add a control</a>
+</header>
+<section class="panel">
+  <div class="bar">
+    <h2>All controls</h2>
+    {{if .D.Rows}}<input type="search" placeholder="Filter controls" data-filter="#controls" aria-label="Filter controls">{{end}}
+  </div>
+  {{if .D.Rows}}
+  <div class="scroll">
+    <table class="table">
+      <thead><tr><th>Code</th><th>Title</th><th>Owners</th><th>Submissions</th><th><span class="sr">Actions</span></th></tr></thead>
+      <tbody id="controls">
+        {{range .D.Rows}}
+        <tr data-text="{{.Code}} {{.Title}} {{.Owners}}">
+          <td class="code">{{.Code}}</td>
+          <td>{{.Title}}</td>
+          <td>{{if .Owners}}{{.Owners}}{{else}}<span class="muted">No owners assigned</span>{{end}}</td>
+          <td>{{.Count}}</td>
+          <td><div class="row-actions"><a class="btn ghost sm" href="/controls/{{.ID}}">Open</a><a class="btn ghost sm" href="/admin/controls/{{.ID}}">Edit</a></div></td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  <p class="empty" data-empty hidden>No controls match that filter.</p>
+  {{else}}
+  <div class="empty"><b>No controls yet</b><p>Add your first control below and choose who owns it.</p></div>
+  {{end}}
+</section>
+<section class="panel" id="new">
+  <h2>Add a control</h2>
+  {{template "control_form" .}}
+</section>
+{{template "foot" .}}{{end}}
+
+{{define "admin_control"}}{{template "head" .}}
+<header class="head">
+  <div><a class="small" href="/admin/controls">Back to controls</a><h1>Edit control</h1><p class="muted"><span class="code">{{.D.Code}}</span> {{.D.ControlTitle}}</p></div>
+  <a class="btn ghost" href="/controls/{{.D.ID}}">Open evidence</a>
+</header>
+<section class="panel">{{template "control_form" .}}</section>
+<section class="panel danger_zone">
+  <h2>Delete this control</h2>
+  <p class="muted">This removes the control, its owner mapping and {{if eq .D.Subs 0}}its settings. No evidence has been uploaded yet{{else if eq .D.Subs 1}}its 1 submission with its files{{else}}all {{.D.Subs}} submissions with their files{{end}}. It cannot be undone.</p>
+  <form method="post" action="/admin/controls/{{.D.ID}}/delete">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <button class="btn danger" type="submit" data-confirm="Click again to delete for good">Delete control</button>
+  </form>
+</section>
+{{template "foot" .}}{{end}}
+
+{{define "admin_users"}}{{template "head" .}}
+<header class="head">
+  <div><h1>People</h1><p class="muted">Everyone who can sign in, and what they can do.</p></div>
+  <a class="btn" href="#new">Add a person</a>
+</header>
+<section class="panel">
+  <div class="bar">
+    <h2>All people</h2>
+    <input type="search" placeholder="Filter people" data-filter="#people" aria-label="Filter people">
+  </div>
+  <div class="scroll">
+    <table class="table">
+      <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Controls</th><th><span class="sr">Actions</span></th></tr></thead>
+      <tbody id="people">
+        {{range .D.Rows}}
+        <tr data-text="{{.Name}} {{.Email}} {{.Role}}">
+          <td><b>{{.Name}}</b></td>
+          <td>{{.Email}}</td>
+          <td><span class="pill role">{{if eq .Role "admin"}}Admin{{else}}User{{end}}</span></td>
+          <td>{{if not .Active}}<span class="pill late">Deactivated</span>{{else if .MustChange}}<span class="pill due">Awaiting first sign in</span>{{else}}<span class="pill ok">Active</span>{{end}}</td>
+          <td>{{.Controls}}</td>
+          <td><div class="row-actions"><a class="btn ghost sm" href="/admin/users/{{.ID}}">Edit</a></div></td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  <p class="empty" data-empty hidden>Nobody matches that filter.</p>
+</section>
+<section class="panel" id="new">
+  <h2>Add a person</h2>
+  <p class="muted">They get a temporary password to share with them, and choose their own on first sign in.</p>
+  <form method="post" action="/admin/users" class="form">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <div class="grid2">
+      <label>Full name<input type="text" name="name" maxlength="120" required placeholder="Alex Morgan"></label>
+      <label>Email<input type="email" name="email" required placeholder="name@company.com"></label>
+      <label>Role
+        <select name="role"><option value="user">User: uploads evidence for their controls</option><option value="admin">Admin: manages controls, people and email</option></select>
+      </label>
+    </div>
+    <div><button class="btn" type="submit">Add person</button></div>
+  </form>
+</section>
+{{template "foot" .}}{{end}}
+
+{{define "admin_user"}}{{template "head" .}}{{$u := .D.U}}
+<header class="head">
+  <div><a class="small" href="/admin/users">Back to people</a><h1>{{$u.Name}}</h1><p class="muted">{{$u.Email}}</p></div>
+</header>
+<div class="split">
+  <div class="stack">
+    <section class="panel">
+      <h2>Details</h2>
+      <form method="post" action="/admin/users/{{$u.ID}}" class="form">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <label>Full name<input type="text" name="name" maxlength="120" required value="{{$u.Name}}"></label>
+        <label>Role
+          <select name="role"><option value="user"{{if eq $u.Role "user"}} selected{{end}}>User</option><option value="admin"{{if eq $u.Role "admin"}} selected{{end}}>Admin</option></select>
+        </label>
+        <label class="check"><input type="checkbox" name="active" value="1"{{if $u.Active}} checked{{end}}> Can sign in</label>
+        {{if .D.Self}}<p class="small muted">This is you. Another admin has to change your role or deactivate you.</p>{{end}}
+        <div><button class="btn" type="submit">Save changes</button></div>
+      </form>
+    </section>
+    <section class="panel">
+      <h2>Password</h2>
+      <p class="muted">Create a new temporary password. Their current sessions end and they choose a new password on next sign in.</p>
+      <form method="post" action="/admin/users/{{$u.ID}}/reset">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <button class="btn ghost" type="submit" data-confirm="Click again to reset">Reset password</button>
+      </form>
+    </section>
+  </div>
+  <section class="panel">
+    <h2>Controls owned</h2>
+    {{if .D.Owned}}
+    <ul class="ledger">
+      {{range .D.Owned}}<li><a class="row" href="/admin/controls/{{.ID}}"><span class="code">{{.Code}}</span><span class="title">{{.Title}}</span></a></li>{{end}}
+    </ul>
+    {{else}}
+    <div class="empty"><b>No controls yet</b><p>Map this person as an owner from any control.</p><a class="btn ghost" href="/admin/controls">Go to controls</a></div>
+    {{end}}
+  </section>
+</div>
+{{template "foot" .}}{{end}}
+
+{{define "admin_settings"}}{{template "head" .}}{{$s := .D.S}}
+<header class="head">
+  <div><h1>Email and schedule</h1><p class="muted">When owners hear from the portal, and how mail is sent.</p></div>
+</header>
+<form method="post" action="/admin/settings" class="stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <section class="panel">
+    <h2>Schedule</h2>
+    <div class="form">
+      <div class="grid2">
+        <label>Monthly request day
+          <input type="number" name="kickoff_day" min="1" max="7" required value="{{$s.KickoffDay}}">
+          <span class="small muted">Day 1 to 7 of each month. Owners with open controls get the request from 08:00 server time.</span>
+        </label>
+        <label>Remind every
+          <span class="suffix"><input type="number" name="reminder_days" min="0" max="31" required value="{{$s.ReminderDays}}"><span>days</span></span>
+          <span class="small muted">Reminders repeat until evidence is in. 1 is daily, 7 is weekly, 0 turns them off.</span>
+        </label>
+      </div>
+      <label>Portal address used in emails
+        <input type="text" name="base_url" value="{{$s.BaseURL}}" placeholder="https://evidence.company.com">
+      </label>
+    </div>
+  </section>
+  <section class="panel">
+    <h2>Mail server</h2>
+    <div class="form">
+      <div class="grid2">
+        <label>SMTP server<input type="text" name="smtp_host" value="{{$s.SMTPHost}}" placeholder="smtp.company.com"></label>
+        <label>Port<input type="number" name="smtp_port" min="1" max="65535" value="{{$s.SMTPPort}}"></label>
+        <label>Security
+          <select name="smtp_tls">
+            <option value="starttls"{{if eq $s.SMTPTLS "starttls"}} selected{{end}}>STARTTLS, usually port 587</option>
+            <option value="tls"{{if eq $s.SMTPTLS "tls"}} selected{{end}}>TLS, usually port 465</option>
+            <option value="none"{{if eq $s.SMTPTLS "none"}} selected{{end}}>None, internal relay on port 25</option>
+          </select>
+        </label>
+        <label>Sender address<input type="email" name="smtp_from" value="{{$s.SMTPFrom}}" placeholder="evidence@company.com"></label>
+        <label>Username<input type="text" name="smtp_user" value="{{$s.SMTPUser}}" autocomplete="off" placeholder="Leave empty for relays without sign in"></label>
+        <label>Password<input type="password" name="smtp_pass" autocomplete="new-password" placeholder="{{if .D.HasPass}}Saved. Type to replace it{{else}}Not set{{end}}"></label>
+      </div>
+      {{if .D.HasPass}}<label class="check"><input type="checkbox" name="clear_pass" value="1"> Remove the saved password</label>{{end}}
+    </div>
+  </section>
+  <div class="row-actions start"><button class="btn" type="submit">Save settings</button></div>
+</form>
+<section class="panel">
+  <h2>Check delivery</h2>
+  <p class="muted">Sends a test message to {{.User.Email}} with the saved settings.</p>
+  <form method="post" action="/admin/settings/test">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <button class="btn ghost" type="submit" data-busy="Sending">Send test email</button>
+  </form>
+</section>
+{{template "foot" .}}{{end}}

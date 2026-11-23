@@ -1,0 +1,150 @@
+{{define "dashboard"}}{{template "head" .}}{{$d := .D}}
+<header class="head">
+  <div>
+    <p class="muted">{{.D.Today}}</p>
+    <h1>{{if .User.IsAdmin}}Evidence overview{{else}}Your controls{{end}}</h1>
+  </div>
+  <form method="get" action="/">
+    <label class="sr" for="period">Period</label>
+    <select id="period" name="period" data-autosubmit>
+      {{range .D.Periods}}<option value="{{.}}"{{if eq . $d.Period}} selected{{end}}>{{period .}}</option>{{end}}
+    </select>
+  </form>
+</header>
+
+<section class="panel hero">
+  <div class="ring" data-value="{{ratio .D.Done .D.Total}}" role="img" aria-label="{{percent .D.Done .D.Total}} percent complete">
+    <svg width="148" height="148" viewBox="0 0 148 148" aria-hidden="true"><circle class="track" cx="74" cy="74" r="62"/><circle class="fill" cx="74" cy="74" r="62"/></svg>
+    <div class="num"><b>{{percent .D.Done .D.Total}}%</b><span>complete</span></div>
+  </div>
+  <div>
+    <h2 class="big">{{period .D.Period}}</h2>
+    <p class="muted">
+      {{if eq .D.Total 0}}{{if .User.IsAdmin}}No controls yet. Add a control and map it to its owners to start collecting.{{else}}No controls are mapped to you yet. Your administrator will add them.{{end}}
+      {{else if eq .D.Open 0}}Every control has evidence for this period.
+      {{else}}{{.D.Open}} of {{.D.Total}} controls still need evidence.{{end}}
+    </p>
+    <div class="facts">
+      <div><b>{{.D.Done}}</b><span>Submitted</span></div>
+      <div><b>{{.D.Open}}</b><span>{{if eq .D.Period .D.Current}}Due{{else}}Missing{{end}}</span></div>
+      <div><b>{{.D.Total}}</b><span>Controls</span></div>
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="bar">
+    <h2>Controls</h2>
+    {{if .D.Rows}}<input type="search" placeholder="Filter by code, title or owner" data-filter="#ledger" aria-label="Filter controls">{{end}}
+  </div>
+  {{if .D.Rows}}
+  <ul class="ledger" id="ledger">
+    {{range .D.Rows}}
+    <li data-text="{{.Code}} {{.Title}} {{.Owners}}">
+      <a class="row" href="/controls/{{.ID}}">
+        <span class="code">{{.Code}}</span>
+        <span class="title">{{.Title}}</span>
+        {{if $.User.IsAdmin}}<span class="small muted">{{if .Owners}}{{.Owners}}{{else}}No owners assigned{{end}}</span>{{end}}
+      </a>
+      <span class="small muted">{{if .Last}}Uploaded {{date .Last}}{{else}}No uploads yet{{end}}</span>
+      <span class="pill {{.Class}}">{{.Status}}</span>
+    </li>
+    {{end}}
+  </ul>
+  <p class="empty" data-empty hidden>No controls match that filter.</p>
+  {{else}}
+  <div class="empty">
+    <b>Nothing to collect yet</b>
+    {{if .User.IsAdmin}}<p>Controls you add appear here with their status for the month.</p><a class="btn" href="/admin/controls#new">Add a control</a>
+    {{else}}<p>When controls are mapped to you, they will appear here.</p>{{end}}
+  </div>
+  {{end}}
+</section>
+{{template "foot" .}}{{end}}
+
+{{define "control"}}{{template "head" .}}{{$d := .D}}
+<header class="head">
+  <div>
+    <a class="small" href="/">Back to overview</a>
+    <h1>{{.D.ControlTitle}}</h1>
+    <p class="muted"><span class="code">{{.D.Code}}</span> Owned by {{if .D.Owners}}{{.D.Owners}}{{else}}nobody yet{{end}}</p>
+  </div>
+  <div class="row-actions">
+    <span class="pill {{.D.Class}}">{{.D.Status}} for {{period .D.Current}}</span>
+    {{if .User.IsAdmin}}<a class="btn ghost sm" href="/admin/controls/{{.D.ID}}">Edit control</a>{{end}}
+  </div>
+</header>
+
+<div class="split">
+  <div class="stack">
+    {{if .D.Description}}
+    <section class="panel">
+      <h2>What to provide</h2>
+      <p class="pre">{{.D.Description}}</p>
+    </section>
+    {{end}}
+    <section class="panel">
+      <h2>Upload evidence</h2>
+      <form method="post" action="/controls/{{.D.ID}}/evidence" enctype="multipart/form-data" class="form">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <div>
+          <label class="drop" tabindex="0">
+            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
+            <b>Drop files here or click to browse</b>
+            <span class="small muted">Up to {{.D.MaxFiles}} files, {{.D.MaxMB}} MB each. PDF, images, Office documents, text, email or zip.</span>
+            <input type="file" name="files" multiple>
+          </label>
+          <ul class="files" aria-live="polite"></ul>
+        </div>
+        <label>Period
+          <select name="period">{{range .D.Periods}}<option value="{{.}}"{{if eq . $d.Current}} selected{{end}}>{{period .}}</option>{{end}}</select>
+        </label>
+        <label><span>Note for the reviewer <span class="muted small">optional</span></span>
+          <textarea name="note" maxlength="4000" placeholder="Anything the reviewer should know about these files"></textarea>
+        </label>
+        <div><button class="btn" type="submit" data-busy="Uploading">Upload evidence</button></div>
+      </form>
+    </section>
+  </div>
+
+  <section class="panel">
+    <h2>History</h2>
+    {{if .D.Subs}}
+    <ol class="timeline">
+      {{range .D.Subs}}
+      <li>
+        <div class="when"><b>{{period .Period}}</b><span class="small muted">{{.By}} on {{date .CreatedAt}}</span></div>
+        {{if .Note}}<p class="pre">{{.Note}}</p>{{end}}
+        <ul class="filelist">
+          {{range .Files}}<li>
+            {{if .Preview}}<a href="/files/{{.ID}}?view=1" data-preview="{{.Preview}}" data-download="/files/{{.ID}}">{{.Name}}</a>
+            {{else}}<a href="/files/{{.ID}}">{{.Name}}</a>{{end}}
+            <span class="small muted">{{size .Size}}</span>
+            {{if .Preview}}<a class="small" href="/files/{{.ID}}">Download</a>{{end}}
+          </li>{{end}}
+        </ul>
+        {{if $.User.IsAdmin}}
+        <form method="post" action="/admin/submissions/{{.ID}}/delete">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <button class="btn danger sm" type="submit" data-confirm="Click again to remove">Remove</button>
+        </form>
+        {{end}}
+      </li>
+      {{end}}
+    </ol>
+    {{else}}
+    <div class="empty"><b>No evidence yet</b><p>Uploads for this control appear here, newest first.</p></div>
+    {{end}}
+  </section>
+</div>
+<dialog class="viewer" aria-label="File preview">
+  <header>
+    <b data-viewer-name></b>
+    <div class="row-actions">
+      <a class="btn sm" data-viewer-download href="#">Download</a>
+      <button class="btn ghost sm" type="button" data-viewer-close>Close</button>
+    </div>
+  </header>
+  <div class="viewer_body" data-viewer-body></div>
+</dialog>
+{{template "foot" .}}{{end}}
