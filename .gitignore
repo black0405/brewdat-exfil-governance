@@ -2,3 +2,6 @@
 *.exe
 /brewdat
 .playwright-mcp/
+# business spreadsheets stay out of the public repo
+*.xlsx
+*.xls

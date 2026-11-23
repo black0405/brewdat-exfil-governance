@@ -2,9 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -146,8 +144,6 @@ func (a *App) changePassword(w http.ResponseWriter, r *http.Request) {
 	a.redirect(w, r, "/", "Password changed.")
 }
 
-// ---------- dashboard ----------
-
 type ControlRow struct {
 	ID                  int64
 	Code, Title, Owners string
@@ -156,234 +152,12 @@ type ControlRow struct {
 	Status, Class       string
 }
 
-func status(count, period, current int) (string, string) {
-	switch {
-	case count > 0:
-		return "Submitted", "ok"
-	case period == current:
-		return "Due", "due"
-	}
-	return "Missing", "late"
-}
-
-func (a *App) dashboard(w http.ResponseWriter, r *http.Request) {
-	u := currentUser(r)
-	now := a.now()
-	cur := periodOf(now)
-	periods := recentPeriods(now, 12)
-	p := cur
-	if q, err := strconv.Atoi(r.URL.Query().Get("period")); err == nil {
-		for _, x := range periods {
-			if x == q {
-				p = q
-			}
-		}
-	}
-	isAdmin := 0
-	if u.IsAdmin() {
-		isAdmin = 1
-	}
-	rows, err := a.db.Query(`SELECT c.id, c.code, c.title,
-		(SELECT COUNT(*) FROM submissions s WHERE s.control_id = c.id AND s.period = ?1),
-		COALESCE((SELECT MAX(s.created_at) FROM submissions s WHERE s.control_id = c.id AND s.period = ?1), 0),
-		COALESCE((SELECT group_concat(u.name, ', ') FROM control_owners o JOIN users u ON u.id = o.user_id WHERE o.control_id = c.id), '')
-		FROM controls c
-		WHERE ?2 = 1 OR c.id IN (SELECT control_id FROM control_owners WHERE user_id = ?3)
-		ORDER BY c.code`, p, isAdmin, u.ID)
-	if err != nil {
-		a.fail(w, r, err)
-		return
-	}
-	defer rows.Close()
-	var list []ControlRow
-	done := 0
-	for rows.Next() {
-		var c ControlRow
-		if err := rows.Scan(&c.ID, &c.Code, &c.Title, &c.Count, &c.Last, &c.Owners); err != nil {
-			a.fail(w, r, err)
-			return
-		}
-		c.Status, c.Class = status(c.Count, p, cur)
-		if c.Count > 0 {
-			done++
-		}
-		list = append(list, c)
-	}
-	a.page(w, r, "dashboard", View{Title: "Overview", Nav: "home", D: map[string]any{
-		"Rows": list, "Done": done, "Total": len(list), "Open": len(list) - done,
-		"Period": p, "Current": cur, "Periods": periods, "Today": now.Format("Monday 2 January"),
-	}})
-}
-
-// ---------- control detail and evidence ----------
-
-type Submission struct {
-	ID        int64
-	Period    int
-	Note, By  string
-	CreatedAt int64
-	Files     []FileRow
-}
+// ---------- files ----------
 
 type FileRow struct {
 	ID   int64
 	Name string
 	Size int64
-}
-
-func (a *App) controlPage(w http.ResponseWriter, r *http.Request) {
-	u, id := currentUser(r), pathID(r)
-	if !a.canAccess(u, id) {
-		a.notFound(w, r)
-		return
-	}
-	var code, title, desc string
-	if err := a.db.QueryRow(`SELECT code, title, description FROM controls WHERE id = ?`, id).Scan(&code, &title, &desc); err != nil {
-		a.notFound(w, r)
-		return
-	}
-	var owners []string
-	orows, err := a.db.Query(`SELECT u.name FROM control_owners o JOIN users u ON u.id = o.user_id WHERE o.control_id = ? ORDER BY u.name`, id)
-	if err != nil {
-		a.fail(w, r, err)
-		return
-	}
-	for orows.Next() {
-		var n string
-		orows.Scan(&n)
-		owners = append(owners, n)
-	}
-	orows.Close()
-
-	rows, err := a.db.Query(`SELECT s.id, s.period, s.note, s.created_at, u.name, COALESCE(f.id, 0), COALESCE(f.orig_name, ''), COALESCE(f.size, 0)
-		FROM submissions s JOIN users u ON u.id = s.user_id LEFT JOIN files f ON f.submission_id = s.id
-		WHERE s.control_id = ? ORDER BY s.created_at DESC, s.id DESC, f.id`, id)
-	if err != nil {
-		a.fail(w, r, err)
-		return
-	}
-	defer rows.Close()
-	var subs []*Submission
-	submitted := map[int]bool{}
-	for rows.Next() {
-		var s Submission
-		var f FileRow
-		if err := rows.Scan(&s.ID, &s.Period, &s.Note, &s.CreatedAt, &s.By, &f.ID, &f.Name, &f.Size); err != nil {
-			a.fail(w, r, err)
-			return
-		}
-		if len(subs) == 0 || subs[len(subs)-1].ID != s.ID {
-			subs = append(subs, &s)
-		}
-		if f.ID != 0 {
-			last := subs[len(subs)-1]
-			last.Files = append(last.Files, f)
-		}
-		submitted[s.Period] = true
-	}
-	now := a.now()
-	cur := periodOf(now)
-	n := 0
-	if submitted[cur] {
-		n = 1
-	}
-	st, cls := status(n, cur, cur)
-	a.page(w, r, "control", View{Title: code, Nav: "home", D: map[string]any{
-		"ID": id, "Code": code, "ControlTitle": title, "Description": desc, "Owners": strings.Join(owners, ", "),
-		"Subs": subs, "Periods": recentPeriods(now, 12), "Current": cur, "Status": st, "Class": cls,
-		"MaxMB": a.cfg.MaxUploadMB, "MaxFiles": maxFiles,
-	}})
-}
-
-func (a *App) uploadEvidence(w http.ResponseWriter, r *http.Request) {
-	u, id := currentUser(r), pathID(r)
-	if !a.canAccess(u, id) {
-		a.notFound(w, r)
-		return
-	}
-	back := fmt.Sprintf("/controls/%d", id)
-	fail := func(msg string) { a.redirect(w, r, back, flashErr(msg)) }
-
-	period, _ := strconv.Atoi(r.PostForm.Get("period"))
-	valid := false
-	for _, p := range recentPeriods(a.now(), 12) {
-		valid = valid || p == period
-	}
-	if !valid {
-		fail("Choose a period from the list.")
-		return
-	}
-	note := strings.TrimSpace(r.PostForm.Get("note"))
-	if len(note) > 4000 {
-		fail("Keep the note under 4000 characters.")
-		return
-	}
-	if r.MultipartForm == nil || len(r.MultipartForm.File["files"]) == 0 {
-		fail("Choose at least one file to upload.")
-		return
-	}
-	headers := r.MultipartForm.File["files"]
-	if len(headers) > maxFiles {
-		fail(fmt.Sprintf("Upload at most %d files at a time.", maxFiles))
-		return
-	}
-	for _, h := range headers {
-		if !allowedExt[strings.ToLower(filepath.Ext(h.Filename))] {
-			fail(fmt.Sprintf("%s is not an accepted file type. Use PDF, images, Office documents, text, email or zip files.", filepath.Base(h.Filename)))
-			return
-		}
-		if h.Size > a.cfg.MaxUploadMB<<20 {
-			fail(fmt.Sprintf("%s is larger than %d MB.", filepath.Base(h.Filename), a.cfg.MaxUploadMB))
-			return
-		}
-	}
-
-	type saved struct {
-		name, stored, sum string
-		size              int64
-	}
-	var done []saved
-	cleanup := func() {
-		for _, s := range done {
-			os.Remove(filepath.Join(a.cfg.DataDir, "files", s.stored))
-		}
-	}
-	for _, h := range headers {
-		s, err := a.storeFile(h.Open)
-		if err != nil {
-			cleanup()
-			a.fail(w, r, err)
-			return
-		}
-		done = append(done, saved{name: filepath.Base(h.Filename), stored: s[0], sum: s[1], size: h.Size})
-	}
-
-	err := func() error {
-		tx, err := a.db.Begin()
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		res, err := tx.Exec(`INSERT INTO submissions (control_id, period, user_id, note, created_at) VALUES (?, ?, ?, ?, ?)`,
-			id, period, u.ID, note, a.now().Unix())
-		if err != nil {
-			return err
-		}
-		sid, _ := res.LastInsertId()
-		for _, s := range done {
-			if _, err := tx.Exec(`INSERT INTO files (submission_id, orig_name, stored_name, size, sha256) VALUES (?, ?, ?, ?, ?)`,
-				sid, s.name, s.stored, s.size, s.sum); err != nil {
-				return err
-			}
-		}
-		return tx.Commit()
-	}()
-	if err != nil {
-		cleanup()
-		a.fail(w, r, err)
-		return
-	}
-	a.redirect(w, r, back, fmt.Sprintf("Evidence uploaded for %s.", periodLabel(period)))
 }
 
 // storeFile copies an upload to a random name under files/, returning the stored name and its sha256.
@@ -504,109 +278,6 @@ func (a *App) activeUsers(controlID int64) ([]UserOption, error) {
 	return out, rows.Err()
 }
 
-func (a *App) adminControls(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.Query(`SELECT c.id, c.code, c.title,
-		(SELECT COUNT(*) FROM submissions s WHERE s.control_id = c.id),
-		COALESCE((SELECT group_concat(u.name, ', ') FROM control_owners o JOIN users u ON u.id = o.user_id WHERE o.control_id = c.id), '')
-		FROM controls c ORDER BY c.code`)
-	if err != nil {
-		a.fail(w, r, err)
-		return
-	}
-	var list []ControlRow
-	for rows.Next() {
-		var c ControlRow
-		rows.Scan(&c.ID, &c.Code, &c.Title, &c.Count, &c.Owners)
-		list = append(list, c)
-	}
-	rows.Close()
-	users, err := a.activeUsers(0)
-	if err != nil {
-		a.fail(w, r, err)
-		return
-	}
-	a.page(w, r, "admin_controls", View{Title: "Controls", Nav: "controls", D: map[string]any{
-		"Rows": list, "Users": users, "ID": int64(0), "Code": "", "ControlTitle": "", "Description": "",
-	}})
-}
-
-func (a *App) editControl(w http.ResponseWriter, r *http.Request) {
-	id := pathID(r)
-	var code, title, desc string
-	var subs int
-	err := a.db.QueryRow(`SELECT code, title, description, (SELECT COUNT(*) FROM submissions WHERE control_id = c.id) FROM controls c WHERE id = ?`, id).
-		Scan(&code, &title, &desc, &subs)
-	if err != nil {
-		a.notFound(w, r)
-		return
-	}
-	users, err := a.activeUsers(id)
-	if err != nil {
-		a.fail(w, r, err)
-		return
-	}
-	a.page(w, r, "admin_control", View{Title: "Edit " + code, Nav: "controls", D: map[string]any{
-		"ID": id, "Code": code, "ControlTitle": title, "Description": desc, "Users": users, "Subs": subs,
-	}})
-}
-
-func (a *App) saveControl(w http.ResponseWriter, r *http.Request) {
-	id := pathID(r) // 0 when creating
-	back := "/admin/controls"
-	if id != 0 {
-		back = fmt.Sprintf("/admin/controls/%d", id)
-	}
-	code := strings.TrimSpace(r.PostForm.Get("code"))
-	title := strings.TrimSpace(r.PostForm.Get("title"))
-	desc := strings.TrimSpace(r.PostForm.Get("description"))
-	if code == "" || title == "" || len(code) > 40 || len(title) > 200 || len(desc) > 4000 {
-		a.redirect(w, r, back, flashErr("Give the control a code (up to 40 characters) and a title (up to 200)."))
-		return
-	}
-	err := func() error {
-		tx, err := a.db.Begin()
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		if id == 0 {
-			res, err := tx.Exec(`INSERT INTO controls (code, title, description, created_at) VALUES (?, ?, ?, ?)`, code, title, desc, a.now().Unix())
-			if err != nil {
-				return err
-			}
-			id, _ = res.LastInsertId()
-		} else {
-			res, err := tx.Exec(`UPDATE controls SET code = ?, title = ?, description = ? WHERE id = ?`, code, title, desc, id)
-			if err != nil {
-				return err
-			}
-			if n, _ := res.RowsAffected(); n == 0 {
-				return sql.ErrNoRows
-			}
-		}
-		if _, err := tx.Exec(`DELETE FROM control_owners WHERE control_id = ?`, id); err != nil {
-			return err
-		}
-		for _, o := range r.PostForm["owners"] {
-			uid, _ := strconv.ParseInt(o, 10, 64)
-			if _, err := tx.Exec(`INSERT OR IGNORE INTO control_owners (control_id, user_id) SELECT ?, id FROM users WHERE id = ? AND active = 1`, id, uid); err != nil {
-				return err
-			}
-		}
-		return tx.Commit()
-	}()
-	switch {
-	case err != nil && strings.Contains(err.Error(), "UNIQUE"):
-		a.redirect(w, r, back, flashErr(fmt.Sprintf("A control with the code %s already exists.", code)))
-	case errors.Is(err, sql.ErrNoRows):
-		a.notFound(w, r)
-	case err != nil:
-		a.fail(w, r, err)
-	default:
-		a.redirect(w, r, "/admin/controls", fmt.Sprintf("Control %s saved.", code))
-	}
-}
-
 // storedFiles lists the on disk names to unlink after a delete commits.
 func (a *App) storedFiles(query string, id int64) []string {
 	rows, err := a.db.Query(query, id)
@@ -717,7 +388,7 @@ func (a *App) editUser(w http.ResponseWriter, r *http.Request) {
 		a.notFound(w, r)
 		return
 	}
-	rows, err := a.db.Query(`SELECT c.id, c.code, c.title FROM controls c JOIN control_owners o ON o.control_id = c.id WHERE o.user_id = ? ORDER BY c.code`, id)
+	rows, err := a.db.Query(`SELECT c.id, c.code, c.title FROM controls c JOIN control_owners o ON o.control_id = c.id WHERE o.user_id = ? ORDER BY length(c.code), c.code`, id)
 	if err != nil {
 		a.fail(w, r, err)
 		return
@@ -857,8 +528,8 @@ func (a *App) testEmail(w http.ResponseWriter, r *http.Request) {
 		a.redirect(w, r, "/admin/settings", flashErr("Add an SMTP server first."))
 		return
 	}
-	body := "This is a test message from BrewDat Evidence Collection.\n\nIf you can read this, monthly requests and reminders will reach your owners.\n"
-	if err := a.mailer(s, u.Email, "BrewDat Evidence Collection test message", body); err != nil {
+	body := "This is a test message from BrewDat Exfil Governance.\n\nIf you can read this, monthly requests and reminders will reach your owners.\n"
+	if err := a.mailer(s, u.Email, "BrewDat Exfil Governance test message", body); err != nil {
 		log.Printf("test email: %v", err)
 		a.redirect(w, r, "/admin/settings", flashErr("The mail server refused the message: "+strings.ReplaceAll(err.Error(), "-", " ")))
 		return

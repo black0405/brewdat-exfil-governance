@@ -1,13 +1,31 @@
-{{define "control_form"}}
+{{define "control_form"}}{{$d := .D}}
 <form method="post" action="{{if .D.ID}}/admin/controls/{{.D.ID}}{{else}}/admin/controls{{end}}" class="form">
   <input type="hidden" name="csrf" value="{{.CSRF}}">
   <div class="grid2">
-    <label>Code<input type="text" name="code" maxlength="40" required value="{{.D.Code}}" placeholder="AC 01"></label>
-    <label>Title<input type="text" name="title" maxlength="200" required value="{{.D.ControlTitle}}" placeholder="Quarterly access review"></label>
+    {{range .D.Columns}}
+      {{if eq .Key "code"}}<label>Control No<input type="text" name="code" maxlength="40" required value="{{$d.Code}}" placeholder="B01"><span class="small muted">Numbers become B01, B02 and so on.</span></label>
+      {{else if eq .Key "title"}}<label class="wide">Control<input type="text" name="title" maxlength="500" required value="{{$d.ControlTitle}}" placeholder="Name of the control"></label>
+      {{else if eq .Key "description"}}<label class="wide">Control Description<textarea name="description" maxlength="8000">{{$d.Description}}</textarea></label>
+      {{else if eq .Key "owners"}}
+      {{else if eq .Key "accepted"}}<label>Accepted risk<input type="number" name="accepted" min="0" step="1" value="{{$d.Accepted}}"><span class="small muted">Items formally accepted as risk. Subtracted from pending.</span></label>
+      {{else if eq .Kind "long"}}<label class="wide">{{.Label}}<textarea name="f_{{.Key}}" maxlength="8000">{{index $d.Fields .Key}}</textarea></label>
+      {{else if eq .Kind "yn"}}{{$v := index $d.Fields .Key}}<label>{{.Label}}
+        <select name="f_{{.Key}}">
+          <option value="">Not set</option>
+          <option{{if eq $v "Yes"}} selected{{end}}>Yes</option>
+          <option{{if eq $v "No"}} selected{{end}}>No</option>
+          {{if and $v (ne $v "Yes") (ne $v "No")}}<option selected>{{$v}}</option>{{end}}
+        </select></label>
+      {{else}}<label>{{.Label}}<input type="text" name="f_{{.Key}}" maxlength="8000" value="{{index $d.Fields .Key}}"></label>
+      {{end}}
+    {{end}}
+    {{if .D.ID}}
+    <label>Identified baseline
+      <input type="number" name="identified" min="0" step="1" value="{{if .D.Identified.Valid}}{{.D.Identified.Int64}}{{end}}" placeholder="Set by the owner in their first month">
+      <span class="small muted">Owners cannot change it. Clear it to let the owner enter it again.</span>
+    </label>
+    {{end}}
   </div>
-  <label>What evidence is needed
-    <textarea name="description" maxlength="4000" placeholder="Describe the files owners should upload each month">{{.D.Description}}</textarea>
-  </label>
   <fieldset class="owners">
     <legend>Owners</legend>
     {{if .D.Users}}
@@ -27,9 +45,18 @@
 
 {{define "admin_controls"}}{{template "head" .}}
 <header class="head">
-  <div><h1>Controls</h1><p class="muted">Define the evidence you need each month and who provides it.</p></div>
-  <a class="btn" href="#new">Add a control</a>
+  <div><h1>Controls</h1><p class="muted">Define each control, its owners and the figures it tracks.</p></div>
+  <div class="row-actions">
+    <a class="btn ghost" href="/sheet.xlsx">Download Excel</a>
+    <a class="btn" href="#new">Add a control</a>
+  </div>
 </header>
+{{if .D.Report}}
+<section class="panel report" role="status">
+  <h2>Import result</h2>
+  <ul>{{range .D.Report}}<li>{{.}}</li>{{end}}</ul>
+</section>
+{{end}}
 <section class="panel">
   <div class="bar">
     <h2>All controls</h2>
@@ -38,14 +65,19 @@
   {{if .D.Rows}}
   <div class="scroll">
     <table class="table">
-      <thead><tr><th>Code</th><th>Title</th><th>Owners</th><th>Submissions</th><th><span class="sr">Actions</span></th></tr></thead>
+      <thead><tr><th>Control No</th><th>Control</th><th>Owners</th><th class="num">Identified</th><th class="num">Remediated</th><th class="num">Pending</th><th class="num">Compliance</th><th class="num">Submissions</th><th><span class="sr">Actions</span></th></tr></thead>
       <tbody id="controls">
         {{range .D.Rows}}
         <tr data-text="{{.Code}} {{.Title}} {{.Owners}}">
           <td class="code">{{.Code}}</td>
           <td>{{.Title}}</td>
           <td>{{if .Owners}}{{.Owners}}{{else}}<span class="muted">No owners assigned</span>{{end}}</td>
-          <td>{{.Count}}</td>
+          {{$f := index $.D.Figs .ID}}
+          <td class="num">{{$f.Identified}}</td>
+          <td class="num">{{$f.Remediated}}</td>
+          <td class="num">{{$f.Pending}}</td>
+          <td class="num">{{if $f.HasScore}}<span class="band {{$f.Band}}">{{$f.Score}}</span>{{else}}<span class="muted">None</span>{{end}}</td>
+          <td class="num">{{.Count}}</td>
           <td><div class="row-actions"><a class="btn ghost sm" href="/controls/{{.ID}}">Open</a><a class="btn ghost sm" href="/admin/controls/{{.ID}}">Edit</a></div></td>
         </tr>
         {{end}}
@@ -54,13 +86,22 @@
   </div>
   <p class="empty" data-empty hidden>No controls match that filter.</p>
   {{else}}
-  <div class="empty"><b>No controls yet</b><p>Add your first control below and choose who owns it.</p></div>
+  <div class="empty"><b>No controls yet</b><p>Import your Excel sheet or add the first control below.</p></div>
   {{end}}
 </section>
-<section class="panel" id="new">
-  <h2>Add a control</h2>
-  {{template "control_form" .}}
+<section class="panel">
+  <h2>Import from Excel</h2>
+  <p class="muted">Upload the controls workbook (.xlsx). Rows are matched on Sr No (1 becomes B01): new ones are added and existing ones updated. Owners are matched to people by email or full name.</p>
+  <form method="post" action="/admin/controls/import" enctype="multipart/form-data" class="row-actions start">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="file" name="sheet" accept=".xlsx" required>
+    <button class="btn ghost" type="submit" data-busy="Importing">Import Excel</button>
+  </form>
 </section>
+<details class="panel add" id="new">
+  <summary><h2>Add a control</h2></summary>
+  {{template "control_form" .}}
+</details>
 {{template "foot" .}}{{end}}
 
 {{define "admin_control"}}{{template "head" .}}
@@ -76,6 +117,180 @@
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <button class="btn danger" type="submit" data-confirm="Click again to delete for good">Delete control</button>
   </form>
+</section>
+{{template "foot" .}}{{end}}
+
+{{define "review_actions"}}
+<form method="post" action="/admin/submissions/{{.ID}}/review" class="form review">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <input type="hidden" name="from" value="{{.From}}">
+  <label>Reason the owner will see
+    <textarea name="reason" maxlength="1000" placeholder="Why it is approved, or what is missing and what to upload instead"></textarea>
+    <span class="small muted">Optional when approving, required when denying. The owner gets it by email.</span>
+  </label>
+  <div class="row-actions start">
+    <button class="btn sm" type="submit" name="decision" value="approve">Approve</button>
+    <button class="btn danger sm" type="submit" name="decision" value="deny">Deny</button>
+  </div>
+</form>
+{{end}}
+
+{{define "meters"}}
+<ul class="meters">
+  {{range .}}
+  <li data-text="{{.Code}} {{.Label}} {{.Sub}} {{.BandLabel}}" title="Identified {{.Identified}}, remediated {{.Remediated}}, pending {{.Pending}}">
+    <div class="meter_name">
+      {{if .ID}}<a href="/controls/{{.ID}}"><span class="code">{{.Code}}</span> {{.Label}}</a>{{else}}<b>{{.Label}}</b>{{end}}
+      <span class="small muted">{{if .ID}}{{if .HasScore}}{{.Pending}} pending of {{.Identified}}{{else}}Waiting for figures{{end}}{{else}}{{.Sub}}, {{.Pending}} pending of {{.Identified}}{{end}}</span>
+    </div>
+    <div class="meter"><span class="meter_fill {{.Band}}" data-value="{{.Ratio}}"></span></div>
+    <span class="meter_value">{{if .HasScore}}{{.Score}}{{else}}None{{end}}</span>
+    <span class="band {{.Band}}">{{.BandLabel}}</span>
+  </li>
+  {{end}}
+</ul>
+{{end}}
+
+{{define "admin_executive"}}{{template "head" .}}
+<header class="head">
+  <div><h1>Executive view</h1><p class="muted">Compliance across every control for {{period .D.Period}}: remediated as a share of identified.</p></div>
+  <div class="row-actions">
+    <a class="btn ghost" href="/sheet?period={{.D.Period}}">Open monthly sheet</a>
+    {{template "period_picker" .}}
+  </div>
+</header>
+
+<section class="panel exec_hero">
+  <div class="gauge" data-value="{{.D.Ratio}}" role="img" aria-label="Overall compliance {{if .D.HasOverall}}{{.D.Overall}} percent{{else}}not available{{end}}">
+    <svg viewBox="0 0 220 128" aria-hidden="true">
+      <path class="zone late" pathLength="100" d="M 22 110 A 88 88 0 0 1 198 110" stroke-dasharray="70 100"/>
+      <path class="zone due" pathLength="100" d="M 22 110 A 88 88 0 0 1 198 110" stroke-dasharray="0 70 20 100"/>
+      <path class="zone ok" pathLength="100" d="M 22 110 A 88 88 0 0 1 198 110" stroke-dasharray="0 90 10 100"/>
+      <path class="track" pathLength="100" d="M 32 110 A 78 78 0 0 1 188 110"/>
+      <path class="fill" pathLength="100" d="M 32 110 A 78 78 0 0 1 188 110" stroke-dasharray="100 100" stroke-dashoffset="100"/>
+      <g class="needle"><line x1="110" y1="110" x2="110" y2="44"/><circle cx="110" cy="110" r="7"/></g>
+      <text x="22" y="126" text-anchor="middle">0</text>
+      <text x="110" y="14" text-anchor="middle">50</text>
+      <text x="198" y="126" text-anchor="middle">100</text>
+    </svg>
+    <div class="gauge_value">
+      <b>{{if .D.HasOverall}}{{.D.Overall}}%{{else}}None yet{{end}}</b>
+      <span>Overall compliance</span>
+      {{if .D.HasOverall}}<span class="band {{.D.Band}}">{{.D.BandLabel}}</span>{{end}}
+    </div>
+  </div>
+  <div class="tiles">
+    <div class="tile"><span>Identified</span><b>{{.D.Identified}}</b></div>
+    <div class="tile"><span>Remediated</span><b>{{.D.Remediated}}</b></div>
+    <div class="tile"><span>Pending</span><b>{{.D.Pending}}</b></div>
+    <div class="tile"><span>Controls with figures</span><b>{{.D.Scored}} of {{.D.Total}}</b></div>
+    <div class="tile"><span>Approved this month</span><b>{{.D.Approved}}</b></div>
+    <div class="tile"><span>In review</span><b>{{.D.Waiting}}</b></div>
+    <div class="tile"><span>Still need evidence</span><b>{{.D.Open}}</b></div>
+  </div>
+  <p class="legend small muted"><span class="band late">At risk</span> below 70%<span class="band due">Watch</span> 70% to 90%<span class="band ok">On track</span> 90% and above</p>
+</section>
+
+{{if .D.Cats}}
+<section class="panel">
+  <div class="bar"><h2>By FIFA Category</h2><span class="small muted">Lowest first</span></div>
+  {{template "meters" .D.Cats}}
+</section>
+{{end}}
+
+<section class="panel">
+  <div class="bar">
+    <h2>By control</h2>
+    <input type="search" placeholder="Filter controls" data-filter="#exec_controls" aria-label="Filter controls">
+  </div>
+  <div id="exec_controls">
+    {{template "meters" .D.Controls}}
+  </div>
+  <p class="small muted">Figures come from this month's submission when there is one, otherwise from the last approved month or the imported sheet.</p>
+</section>
+{{template "foot" .}}{{end}}
+
+{{define "review_tabs"}}
+<nav class="tabs" aria-label="Review">
+  <a href="/admin/review"{{if eq .Title "Review"}} aria-current="page"{{end}}>Waiting{{if .Review}} <span class="badge">{{.Review}}</span>{{end}}</a>
+  <a href="/admin/review?show=reviewed"{{if eq .Title "Reviewed"}} aria-current="page"{{end}}>Reviewed</a>
+</nav>
+{{end}}
+
+{{define "admin_review"}}{{template "head" .}}
+<header class="head">
+  <div><h1>Review</h1><p class="muted">Evidence waiting for a decision, oldest first. Owners are emailed either way.</p></div>
+  {{template "review_tabs" .}}
+</header>
+{{if .D.Subs}}
+<div class="stack">
+  {{range .D.Subs}}
+  <section class="panel review_item">
+    <div class="bar">
+      <div>
+        <a class="code" href="/controls/{{.ControlID}}">{{.Code}}</a>
+        <h2>{{.Title}}</h2>
+        <p class="small muted">{{period .Period}}, submitted by {{.By}} on {{date .CreatedAt}}</p>
+      </div>
+      <span class="pill {{.Class}}">{{.Label}}</span>
+    </div>
+    {{if .Figures}}<p>{{.Figures}}</p>{{end}}
+    {{if .Note}}<p class="pre muted">{{.Note}}</p>{{end}}
+    {{template "files" .Files}}
+    {{template "review_actions" (reviewArgs $.CSRF .ID "queue")}}
+  </section>
+  {{end}}
+</div>
+{{template "viewer"}}
+{{else}}
+<section class="panel empty"><b>Nothing to review</b><p>New submissions will appear here. Past decisions are under Reviewed.</p></section>
+{{end}}
+{{template "foot" .}}{{end}}
+
+{{define "admin_reviewed"}}{{template "head" .}}
+<header class="head">
+  <div><h1>Review</h1><p class="muted">Every decision, newest first: {{.D.Approved}} approved and {{.D.Denied}} denied.</p></div>
+  {{template "review_tabs" .}}
+</header>
+<section class="panel">
+  <div class="bar">
+    <h2>Reviewed</h2>
+    {{if .D.Subs}}
+    <div class="row-actions">
+      <div class="chips" role="group" aria-label="Show">
+        <button type="button" class="chip" data-chip="" aria-pressed="true">All</button>
+        <button type="button" class="chip" data-chip="approved" aria-pressed="false">Approved</button>
+        <button type="button" class="chip" data-chip="denied" aria-pressed="false">Denied</button>
+      </div>
+      <input type="search" placeholder="Filter by control, person or month" data-filter="#reviewed" aria-label="Filter decisions">
+    </div>
+    {{end}}
+  </div>
+  {{if .D.Subs}}
+  <div class="scroll">
+    <table class="table reviewed">
+      <thead><tr><th>Decision</th><th>Month</th><th>Control</th><th>Submitted by</th><th>Figures</th><th>Evidence</th><th>Reviewed</th><th>Reason</th></tr></thead>
+      <tbody id="reviewed">
+        {{range .D.Subs}}
+        <tr data-text="{{.Label}} {{period .Period}} {{.Code}} {{.Title}} {{.By}} {{.ReviewedBy}}" data-status="{{.Status}}">
+          <td><span class="pill {{.Class}}">{{.Label}}</span></td>
+          <td>{{period .Period}}</td>
+          <td><a href="/controls/{{.ControlID}}"><span class="code">{{.Code}}</span><br>{{.Title}}</a></td>
+          <td>{{.By}}<br><span class="small muted">{{date .CreatedAt}}</span></td>
+          <td class="small">{{if .Figures}}{{.Figures}}{{else}}<span class="muted">None</span>{{end}}</td>
+          <td class="small">{{if .Files}}{{template "files" .Files}}{{else if .Note}}{{.Note}}{{else}}<span class="muted">No files</span>{{end}}</td>
+          <td>{{if .ReviewedBy}}{{.ReviewedBy}}{{else}}<span class="muted">Not recorded</span>{{end}}<br><span class="small muted">{{if .ReviewedAt}}{{date .ReviewedAt}}{{end}}</span></td>
+          <td class="small">{{if .Reason}}{{.Reason}}{{else}}<span class="muted">None</span>{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  <p class="empty" data-empty hidden>No decisions match that filter.</p>
+  {{template "viewer"}}
+  {{else}}
+  <div class="empty"><b>No decisions yet</b><p>Approved and denied evidence will be listed here.</p></div>
+  {{end}}
 </section>
 {{template "foot" .}}{{end}}
 

@@ -1,4 +1,4 @@
-// BrewDat Evidence Collection: a single binary evidence portal.
+// BrewDat Exfil Governance: a single binary evidence portal.
 package main
 
 import (
@@ -161,7 +161,54 @@ func openDB(dataDir string) (*sql.DB, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("schema: %w", err)
 	}
-	return db, nil
+	return db, migrate(db)
+}
+
+// migrations run once each, in order, tracked by PRAGMA user_version.
+var migrations = []string{`
+ALTER TABLE controls ADD COLUMN fields TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE controls ADD COLUMN identified INTEGER;
+ALTER TABLE controls ADD COLUMN accepted INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE submissions ADD COLUMN status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','denied'));
+ALTER TABLE submissions ADD COLUMN remediated INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE submissions ADD COLUMN accepted INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE submissions ADD COLUMN deny_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE submissions ADD COLUMN reviewed_by INTEGER REFERENCES users(id);
+ALTER TABLE submissions ADD COLUMN reviewed_at INTEGER NOT NULL DEFAULT 0;
+UPDATE submissions SET status = 'approved';
+CREATE VIEW latest AS SELECT s.* FROM submissions s
+  WHERE s.id = (SELECT MAX(id) FROM submissions x WHERE x.control_id = s.control_id AND x.period = s.period);
+`, `
+ALTER TABLE controls ADD COLUMN remediated INTEGER; -- last known figure from an imported sheet
+`, `
+UPDATE controls SET code = printf('B%02d', CAST(code AS INTEGER))
+  WHERE code GLOB '[0-9]*' AND code NOT GLOB '*[^0-9]*'
+  AND printf('B%02d', CAST(code AS INTEGER)) NOT IN (SELECT code FROM controls);
+`}
+
+func migrate(db *sql.DB) error {
+	var v int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		return err
+	}
+	for ; v < len(migrations); v++ {
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(migrations[v]); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("migration %d: %w", v+1, err)
+		}
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", v+1)); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func newApp(cfg Config, db *sql.DB) (*App, error) {
@@ -248,7 +295,7 @@ func main() {
 		defer cancel()
 		srv.Shutdown(shut)
 	}()
-	log.Printf("BrewDat Evidence Collection listening on %s", cfg.Addr)
+	log.Printf("BrewDat Exfil Governance listening on %s", cfg.Addr)
 	if cfg.TLSCert != "" {
 		err = srv.ListenAndServeTLS(cfg.TLSCert, cfg.TLSKey)
 	} else {
@@ -281,11 +328,18 @@ func (a *App) routes() http.Handler {
 	user("GET /controls/{id}", a.controlPage)
 	user("POST /controls/{id}/evidence", a.uploadEvidence)
 	user("GET /files/{id}", a.downloadFile)
+	user("POST /controls/{id}/nochange", a.noChange)
+	user("GET /sheet", a.sheetPage)
+	user("GET /sheet.xlsx", a.sheetExport)
 	user("GET /account", a.accountPage)
 	user("POST /account/password", a.changePassword)
 
 	admin("GET /admin/controls", a.adminControls)
 	admin("POST /admin/controls", a.saveControl)
+	admin("POST /admin/controls/import", a.importControls)
+	admin("GET /admin/review", a.reviewPage)
+	admin("GET /admin/executive", a.executive)
+	admin("POST /admin/submissions/{id}/review", a.reviewSubmission)
 	admin("GET /admin/controls/{id}", a.editControl)
 	admin("POST /admin/controls/{id}", a.saveControl)
 	admin("POST /admin/controls/{id}/delete", a.deleteControl)
@@ -394,6 +448,7 @@ type View struct {
 	Flash  string // toast
 	Notice string // banner that stays, used for temporary passwords
 	Err    string // error banner
+	Review int    // submissions waiting for an admin, shown as a nav badge
 	D      map[string]any
 }
 
@@ -420,6 +475,10 @@ var funcs = template.FuncMap{
 		}
 		return strconv.FormatFloat(float64(done)/float64(total), 'f', 3, 64)
 	},
+	"last": func(i int, s []any) bool { return i == len(s)-1 },
+	"reviewArgs": func(csrf string, id int64, from string) map[string]any {
+		return map[string]any{"CSRF": csrf, "ID": id, "From": from}
+	},
 	"percent": func(done, total int) int {
 		if total == 0 {
 			return 0
@@ -445,6 +504,9 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, status int, page st
 	}
 	if v.D == nil {
 		v.D = map[string]any{}
+	}
+	if v.User.IsAdmin() {
+		v.Review = a.pendingReviews()
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")

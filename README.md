@@ -1,4 +1,4 @@
-# BrewDat Evidence Collection
+# BrewDat Exfil Governance
 
 Monthly evidence collection portal. Admins define controls and map them to owners. Owners sign in and upload evidence per month. The portal emails owners in the first week of every month and sends reminders at an interval the admin chooses until evidence is in.
 
@@ -9,7 +9,7 @@ Built as one Go binary (web server, scheduler, mailer) with an embedded SQLite d
 First install on a fresh RHEL 8 or 9, Rocky or Alma server:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/black0405/brewdat-evidence-collection/main/deploy.sh | sudo ADMIN_EMAIL=you@company.com bash
+curl -fsSL https://raw.githubusercontent.com/black0405/brewdat-exfil-governance/main/deploy.sh | sudo ADMIN_EMAIL=you@company.com bash
 ```
 
 Every update after that pulls the latest commit, runs the tests, builds and restarts:
@@ -28,6 +28,24 @@ Private repository: use a deploy key or token in `REPO_URL`, for example `https:
 2. Go to **Email and schedule**: enter the SMTP server and the portal address, then press **Send test email**.
 3. Under **People**, add the people who own controls. Share each temporary password with its owner.
 4. Under **Controls**, add the controls and tick their owners.
+
+## Controls, monthly figures and review
+
+* **Controls** carry the columns of the Egress Point Monitoring sheet. Admins can import the workbook under **Controls > Import from Excel**. Rows are matched on Sr No, which becomes the control number (1 becomes B01), owners are matched by email or full name, and merged cells are filled down. Re-importing updates existing controls.
+* **Monthly figures:**
+  * **Identified** is entered once, in the control's first month, and becomes a fixed baseline that owners cannot change. Admins can correct it on the control.
+  * **Remediated** is the running total, entered each month.
+  * **Accepted risk** is set by admins.
+  * **Pending** is calculated as Identified − Remediated − Accepted risk.
+  * **Compliance score** is Remediated ÷ Identified.
+* **No change from last month** resubmits the previous figures without new files.
+* **Review:** every submission goes to **Review** for an admin to approve or deny, and a denial needs a reason. Owners are emailed either way. A control counts as done for the month only once approved. Reminders pause while evidence waits for review and restart after a denial.
+* **Overview** shows every control as a card with Identified, Remediated, Pending and Compliance score.
+* **Executive view** (admins) shows:
+  * a speedometer for overall compliance across all controls, with key totals beside it;
+  * controls ranked by compliance, lowest first, grouped by FIFA Category and listed one by one, each labelled At risk (below 70%), Watch (70% to 90%) or On track.
+* **Who submits:** only a control's owners submit evidence. Admins view and review.
+* **Monthly sheet** shows every column and figure for any month. **Download Excel** gives one sheet per month in a single workbook.
 
 ## How emails work
 
@@ -130,4 +148,4 @@ Visible UI text uses no hyphen or dash characters (dates read "23 Nov 2026", per
 
 ## Not built yet
 
-These can be added when needed: a self service forgot password email, a review and approval step for evidence, an audit log, a "send reminders now" button, skipping weekends, and periods other than monthly.
+These can be added when needed: a self service forgot password email, an audit log, a "send reminders now" button, skipping weekends, and periods other than monthly.

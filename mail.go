@@ -126,7 +126,7 @@ func buildMessage(from, to, subject, body string, now time.Time) []byte {
 	if i := strings.LastIndex(from, "@"); i >= 0 {
 		domain = from[i+1:]
 	}
-	fmt.Fprintf(&b, "From: %s <%s>\r\n", mime.QEncoding.Encode("utf-8", "BrewDat Evidence Collection"), headerSafe(from))
+	fmt.Fprintf(&b, "From: %s <%s>\r\n", mime.QEncoding.Encode("utf-8", "BrewDat Exfil Governance"), headerSafe(from))
 	fmt.Fprintf(&b, "To: <%s>\r\n", headerSafe(to))
 	fmt.Fprintf(&b, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", headerSafe(subject)))
 	fmt.Fprintf(&b, "Date: %s\r\n", now.Format(time.RFC1123Z))
@@ -172,11 +172,13 @@ func calendarDays(a, b time.Time) int {
 }
 
 // due decides which email, if any, an owner gets right now: "kickoff", "reminder" or "".
-func due(now time.Time, kickoffDay, reminderDays int, kickoffSent bool, lastSent time.Time, open int) string {
-	if open == 0 || now.Hour() < sendHour {
+// missing counts controls with nothing submitted this month; denied counts controls whose latest
+// submission was denied. Controls waiting for review or approved never trigger an email.
+func due(now time.Time, kickoffDay, reminderDays int, kickoffSent bool, lastSent time.Time, missing, denied int) string {
+	if missing+denied == 0 || now.Hour() < sendHour {
 		return ""
 	}
-	if !kickoffSent {
+	if !kickoffSent && missing > 0 {
 		if now.Day() >= kickoffDay {
 			return "kickoff"
 		}
@@ -189,9 +191,11 @@ func due(now time.Time, kickoffDay, reminderDays int, kickoffSent bool, lastSent
 }
 
 type owner struct {
-	id          int64
-	email, name string
-	open        []string
+	id              int64
+	email, name     string
+	open            []string
+	missing, denied int
+	lastDenied      int64
 }
 
 func (a *App) sendDue(now time.Time) {
@@ -200,10 +204,13 @@ func (a *App) sendDue(now time.Time) {
 		return
 	}
 	period := periodOf(now)
-	rows, err := a.db.Query(`SELECT u.id, u.email, u.name, c.code, c.title
+	prev := periodOf(time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location()).AddDate(0, -1, 0))
+	rows, err := a.db.Query(`SELECT u.id, u.email, u.name, c.code, c.title, p.period, COALESCE(l.status, ''), COALESCE(l.reviewed_at, 0)
 		FROM control_owners o JOIN users u ON u.id = o.user_id JOIN controls c ON c.id = o.control_id
-		WHERE u.active = 1 AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.control_id = c.id AND s.period = ?)
-		ORDER BY u.id, c.code`, period)
+		JOIN (SELECT ?1 AS period UNION ALL SELECT ?2) p
+		LEFT JOIN latest l ON l.control_id = c.id AND l.period = p.period
+		WHERE u.active = 1 AND (l.status = 'denied' OR (l.id IS NULL AND p.period = ?1))
+		ORDER BY u.id, p.period DESC, length(c.code), c.code`, period, prev)
 	if err != nil {
 		log.Printf("scheduler: %v", err)
 		return
@@ -211,8 +218,10 @@ func (a *App) sendDue(now time.Time) {
 	var owners []*owner
 	for rows.Next() {
 		var o owner
-		var code, title string
-		if err := rows.Scan(&o.id, &o.email, &o.name, &code, &title); err != nil {
+		var code, title, st string
+		var p int
+		var reviewed int64
+		if err := rows.Scan(&o.id, &o.email, &o.name, &code, &title, &p, &st, &reviewed); err != nil {
 			log.Printf("scheduler: %v", err)
 			continue
 		}
@@ -220,7 +229,19 @@ func (a *App) sendDue(now time.Time) {
 			owners = append(owners, &o)
 		}
 		last := owners[len(owners)-1]
-		last.open = append(last.open, fmt.Sprintf("  • %s: %s", code, title))
+		item := fmt.Sprintf("  • %s: %s", code, title)
+		if st == "denied" {
+			last.denied++
+			last.lastDenied = max(last.lastDenied, reviewed)
+			if p == period {
+				item += " (denied, upload again)"
+			} else {
+				item += " (" + periodLabel(p) + " denied, upload again)"
+			}
+		} else {
+			last.missing++
+		}
+		last.open = append(last.open, item)
 	}
 	rows.Close()
 
@@ -229,7 +250,12 @@ func (a *App) sendDue(now time.Time) {
 		var last int64
 		a.db.QueryRow(`SELECT EXISTS (SELECT 1 FROM email_log WHERE user_id = ?1 AND period = ?2 AND kind = 'kickoff'),
 			COALESCE((SELECT MAX(sent_at) FROM email_log WHERE user_id = ?1 AND period = ?2), 0)`, o.id, period).Scan(&kickoff, &last)
-		kind := due(now, s.KickoffDay, s.ReminderDays, kickoff, time.Unix(last, 0), len(o.open))
+		last = max(last, o.lastDenied) // the denial email counts as the last contact
+		var lastSent time.Time
+		if last > 0 {
+			lastSent = time.Unix(last, 0)
+		}
+		kind := due(now, s.KickoffDay, s.ReminderDays, kickoff, lastSent, o.missing, o.denied)
 		if kind == "" {
 			continue
 		}
@@ -245,23 +271,42 @@ func (a *App) sendDue(now time.Time) {
 	}
 }
 
+// reviewText is the email an owner gets when an admin approves or denies their evidence.
+func reviewText(approved bool, name, code, title string, period int, reason, baseURL string, controlID int64) (string, string) {
+	label := periodLabel(period)
+	if approved {
+		note := ""
+		if reason != "" {
+			note = "Reason: " + reason + "\n\n"
+		}
+		return fmt.Sprintf("Evidence approved for %s: %s", label, code),
+			fmt.Sprintf("Hello %s,\n\nYour %s evidence for %s: %s was approved. Nothing more is needed for this month.\n\n%sThank you,\nBrewDat Exfil Governance\n", name, label, code, title, note)
+	}
+	link := "Please sign in to BrewDat Exfil Governance and upload it again."
+	if baseURL != "" {
+		link = fmt.Sprintf("Please upload it again here: %s/controls/%d", baseURL, controlID)
+	}
+	return fmt.Sprintf("Evidence denied for %s: %s", label, code),
+		fmt.Sprintf("Hello %s,\n\nYour %s evidence for %s: %s was denied.\n\nReason: %s\n\n%s\n\nYou will get reminders until new evidence is uploaded.\n\nThank you,\nBrewDat Exfil Governance\n", name, label, code, title, reason, link)
+}
+
 func emailText(kind, name string, period int, open []string, baseURL string) (string, string) {
 	label := periodLabel(period)
-	link := "Sign in to BrewDat Evidence Collection to upload your files."
+	link := "Sign in to BrewDat Exfil Governance to upload your files."
 	if baseURL != "" {
 		link = "Upload your files here: " + baseURL
 	}
 	list := strings.Join(open, "\n")
 	if kind == "kickoff" {
 		return "Evidence requested for " + label,
-			fmt.Sprintf("Hello %s,\n\nThe %s evidence collection is now open. Please upload evidence for the controls you own:\n\n%s\n\n%s\n\nThank you,\nBrewDat Evidence Collection\n", name, label, list, link)
+			fmt.Sprintf("Hello %s,\n\nThe %s evidence collection is now open. Please upload evidence for the controls you own:\n\n%s\n\n%s\n\nThank you,\nBrewDat Exfil Governance\n", name, label, list, link)
 	}
 	what := "1 control still needs"
 	if len(open) != 1 {
 		what = fmt.Sprintf("%d controls still need", len(open))
 	}
 	return "Reminder: evidence still needed for " + label,
-		fmt.Sprintf("Hello %s,\n\nA friendly reminder that %s evidence for %s:\n\n%s\n\n%s\n\nThank you,\nBrewDat Evidence Collection\n", name, what, label, list, link)
+		fmt.Sprintf("Hello %s,\n\nA friendly reminder that %s evidence for %s:\n\n%s\n\n%s\n\nThank you,\nBrewDat Exfil Governance\n", name, what, label, list, link)
 }
 
 // backup writes one consistent copy of the database per day and keeps the newest 7.

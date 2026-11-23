@@ -1,4 +1,4 @@
-// BrewDat Evidence Collection: theme, drag and drop upload, ring animation, toasts.
+// BrewDat Exfil Governance: theme, drag and drop upload, ring animation, toasts.
 (function () {
   const root = document.documentElement;
 
@@ -27,6 +27,21 @@
       fill.style.strokeDashoffset = String(389.56 * (1 - p));
     }));
   });
+
+  // Meters and the gauge animate from empty to their value.
+  const meters = document.querySelectorAll(".meter_fill[data-value]");
+  const gauge = document.querySelector(".gauge[data-value]");
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    meters.forEach((m) => {
+      const v = Math.max(0, Math.min(1, parseFloat(m.dataset.value) || 0));
+      m.style.width = (v * 100).toFixed(1) + "%";
+    });
+    if (gauge) {
+      const v = Math.max(0, Math.min(1, parseFloat(gauge.dataset.value) || 0));
+      gauge.querySelector(".fill").style.strokeDashoffset = String(100 - v * 100);
+      gauge.querySelector(".needle").style.transform = "rotate(" + (v * 180 - 90).toFixed(1) + "deg)";
+    }
+  }));
 
   // Drag and drop upload zone
   document.querySelectorAll(".drop").forEach((zone) => {
@@ -93,6 +108,23 @@
     });
   });
 
+  // Status chips: show all rows or only one decision, combined with the text filter.
+  document.querySelectorAll("[data-chip]").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      const panel = chip.closest(".panel");
+      panel.querySelectorAll("[data-chip]").forEach((c) => c.setAttribute("aria-pressed", String(c === chip)));
+      const want = chip.dataset.chip;
+      let shown = 0;
+      panel.querySelectorAll("tr[data-status]").forEach((row) => {
+        const hit = !want || row.dataset.status === want;
+        row.classList.toggle("off", !hit);
+        if (hit && !row.hidden) shown++;
+      });
+      const empty = panel.querySelector("[data-empty]");
+      if (empty) empty.hidden = shown > 0;
+    });
+  });
+
   // Selects that navigate on change.
   document.querySelectorAll("[data-autosubmit]").forEach((sel) =>
     sel.addEventListener("change", () => sel.form.submit())
@@ -133,6 +165,22 @@
     viewer.querySelector("[data-viewer-close]").addEventListener("click", () => viewer.close());
     viewer.addEventListener("click", (ev) => { if (ev.target === viewer) viewer.close(); });
     viewer.addEventListener("close", () => body.replaceChildren());
+  }
+
+  // Live pending figure on the upload form: identified minus remediated minus accepted.
+  const pending = document.querySelector("[data-pending]");
+  if (pending) {
+    const ident = document.querySelector("[data-identified]");
+    const rem = document.querySelector("[data-remediated]");
+    const update = () => {
+      const i = ident ? parseInt(ident.value, 10) : parseInt(pending.dataset.pending, 10);
+      const r = parseInt(rem.value, 10);
+      const a = parseInt(pending.dataset.accepted, 10) || 0;
+      if (isNaN(i) || isNaN(r)) { pending.textContent = "None yet"; return; }
+      const p = i - r - a;
+      pending.textContent = p < 0 ? "Too high" : String(p);
+    };
+    [ident, rem].forEach((el) => el && el.addEventListener("input", update));
   }
 
   // Login page bubbles
